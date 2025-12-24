@@ -97,7 +97,7 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, val_loader, device):
+def validate(model, val_loader, device, train_vae_only=False):
     """Validation loop with F1 and EM metrics."""
     model.eval()
     total_loss = 0.0
@@ -122,9 +122,14 @@ def validate(model, val_loader, device):
             question_mask,
             answer_ids,
             answer_mask,
+            train_vae_only=train_vae_only,
         )
         total_loss += outputs["loss"].item()
         num_batches += 1
+        
+        # If VAE only, we don't need to generate answers for F1/EM
+        if train_vae_only:
+            continue
         
         # 2. Generate Answers (for metrics)
         # Only generate for a subset if validation is too slow, but for now do all
@@ -149,6 +154,9 @@ def validate(model, val_loader, device):
         all_references.extend(ref_texts)
 
     avg_loss = total_loss / max(num_batches, 1)
+    
+    if train_vae_only:
+        return {"loss": avg_loss}
     
     # Compute metrics
     metrics = compute_metrics(all_predictions, all_references)
@@ -357,11 +365,21 @@ def main():
                 )
             
             avg_vae_loss = epoch_vae_loss / len(train_loader)
-            print(f"Warmup Epoch {epoch+1}: Avg VAE Loss = {avg_vae_loss:.4f}")
             
-            # Check for convergence/early stopping
-            if avg_vae_loss < best_vae_loss:
-                best_vae_loss = avg_vae_loss
+            # Validate VAE
+            val_metrics = validate(model, val_loader, device, train_vae_only=True)
+            val_vae_loss = val_metrics["loss"]
+            
+            print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f}")
+            
+            wandb.log({
+                "warmup/val_vae_loss": val_vae_loss,
+                "warmup/epoch": epoch
+            })
+            
+            # Check for convergence/early stopping based on VALIDATION loss
+            if val_vae_loss < best_vae_loss:
+                best_vae_loss = val_vae_loss
                 patience_counter = 0
                 # Save warmup checkpoint
                 torch.save(model.state_dict(), os.path.join(args.output_dir, "vae_warmup_best.pt"))
