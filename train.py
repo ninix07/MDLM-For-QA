@@ -127,19 +127,17 @@ def validate(model, val_loader, device, train_vae_only=False):
         total_loss += outputs["loss"].item()
         num_batches += 1
         
-        # If VAE only, we don't need to generate answers for F1/EM
+        # 2. Generate/Reconstruct Answers (for metrics)
         if train_vae_only:
-            continue
-        
-        # 2. Generate Answers (for metrics)
-        # Only generate for a subset if validation is too slow, but for now do all
-        gen_outputs = model.generate(
-            context_ids,
-            context_mask,
-            question_ids,
-            question_mask,
-            show_progress=False
-        )
+            gen_outputs = model.vae_reconstruct(answer_ids, answer_mask)
+        else:
+            gen_outputs = model.generate(
+                context_ids,
+                context_mask,
+                question_ids,
+                question_mask,
+                show_progress=False
+            )
         
         # Decode predictions
         pred_texts = model.decode_tokens_to_text(gen_outputs["tokens"], gen_outputs["is_null"])
@@ -154,9 +152,6 @@ def validate(model, val_loader, device, train_vae_only=False):
         all_references.extend(ref_texts)
 
     avg_loss = total_loss / max(num_batches, 1)
-    
-    if train_vae_only:
-        return {"loss": avg_loss}
     
     # Compute metrics
     metrics = compute_metrics(all_predictions, all_references)
@@ -372,11 +367,15 @@ def main():
             # Validate VAE
             val_metrics = validate(model, val_loader, device, train_vae_only=True)
             val_vae_loss = val_metrics["loss"]
+            val_f1 = val_metrics["f1"]
+            val_em = val_metrics["em"]
             
-            print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f}")
+            print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f}, F1 = {val_f1:.2f}, EM = {val_em:.2f}")
             
             wandb.log({
                 "warmup/val_vae_loss": val_vae_loss,
+                "warmup/val_f1": val_f1,
+                "warmup/val_em": val_em,
                 "warmup/epoch": epoch
             })
             

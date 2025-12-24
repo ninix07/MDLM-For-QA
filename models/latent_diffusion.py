@@ -143,12 +143,36 @@ class LatentDiffusionQA(nn.Module):
     ) -> torch.Tensor:
         """Decode latent back to tokens."""
         if self.use_vae:
-            logits = self.vae.decode(z)
+            hidden = self.vae.decode(z)
+            # Project hidden to logits using embedding weight tying
+            embed_weight = self.vae.embeddings.weight
+            logits = torch.matmul(hidden, embed_weight.T)
+            
             if return_tokens:
                 return logits.argmax(dim=-1)
             return logits
         else:
             return self.vae.decode(z, return_logits=not return_tokens)
+
+    def vae_reconstruct(
+        self,
+        answer_ids: torch.Tensor,
+        answer_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Reconstruct answers using only the VAE."""
+        # Encode to latent
+        z = self.encode_answer(answer_ids, answer_mask)
+        
+        # Decode latent to tokens
+        tokens = self.decode_latent(z, return_tokens=True)
+        
+        # Identify null answers (first token is null_ans_token_id)
+        is_null = (tokens[:, 0] == self.null_ans_token_id)
+        
+        return {
+            "tokens": tokens,
+            "is_null": is_null,
+        }
 
     def forward(
         self,
