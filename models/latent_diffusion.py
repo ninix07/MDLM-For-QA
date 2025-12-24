@@ -295,27 +295,27 @@ class LatentDiffusionQA(nn.Module):
             show_progress=show_progress,
         )
 
-        # Requirement 2: Latent Calibration
-        # Denormalize latent if scaler is provided
+        # 1. Decode to tokens (using denormalized latent)
+        z_denorm = self.scaler.inverse_transform(z_0) if self.scaler is not None else z_0
+        tokens = self.decode_latent(z_denorm, return_tokens=True)
+
+        # 2. Check for null answer (in NORMALIZED space)
+        null_raw = self.get_null_ans_embedding(device) # [seq_len, dim]
+        
+        # Transform the null reference into the diffusion space
         if self.scaler is not None:
-            # We don't have a mask here during generation, but we can re-mask 
-            # if we had one. Usually we just denormalize everything.
-            # However, the user mentioned ensuring it's applied.
-            z_0 = self.scaler.inverse_transform(z_0)
+            # Scaler expects [batch, seq, dim]
+            null_norm_ref = self.scaler.transform(null_raw.unsqueeze(0)).squeeze(0)
+        else:
+            null_norm_ref = null_raw
 
-        # Decode to tokens
-        tokens = self.decode_latent(z_0, return_tokens=True)
-
-        # Check for null answer
-        null_emb = self.get_null_ans_embedding(device)
-
-        # Pool latent for comparison (mean over sequence)
-        z_sink = z_0[:, 0, :] 
-        null_sink = null_emb[0, :] if null_emb.dim() > 1 else null_emb
-
-        z_norm = F.normalize(z_sink, p=2, dim=-1)
-        null_norm = F.normalize(null_sink.unsqueeze(0), p=2, dim=-1)
-        null_similarity = (z_norm * null_norm).sum(dim=-1)
+        # Compare normalized generated z_0 with normalized reference
+        z_pooled = z_0.mean(dim=1) 
+        null_pooled = null_norm_ref.mean(dim=0)
+        
+        z_vec = F.normalize(z_pooled, p=2, dim=-1)
+        n_vec = F.normalize(null_pooled.unsqueeze(0), p=2, dim=-1)
+        null_similarity = (z_vec * n_vec).sum(dim=-1)
 
         is_null = null_similarity > null_threshold
 

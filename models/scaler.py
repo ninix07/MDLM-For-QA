@@ -49,17 +49,20 @@ class LatentScaler:
         self.mean = all_latents.mean(dim=0).to(device)
         self.std = all_latents.std(dim=0).to(device)
         
-        # Avoid division by zero
-        self.std = torch.clamp(self.std, min=1e-5)
+        # Avoid division by zero and handle collapsed dimensions
+        self.std = torch.clamp(self.std, min=1e-3)
         
         print(f"LatentScaler fitted: mean_norm={self.mean.norm().item():.4f}, std_norm={self.std.norm().item():.4f}")
 
     def transform(self, z, mask: Optional[torch.Tensor] = None):
-        """Normalize z: (z - mu) / sigma, with optional zero-remasking."""
+        """Normalize z: (z - mu) / sigma, with optional zero-remasking and clipping."""
         if self.mean is None:
             return z
         
         z_norm = (z - self.mean) / self.std
+        
+        # Clipping to prevent extreme outliers from destabilizing diffusion
+        z_norm = torch.clamp(z_norm, min=-5.0, max=5.0)
         
         if mask is not None:
             # Ensure mask is [batch, seq_len, 1] for broadcasting
