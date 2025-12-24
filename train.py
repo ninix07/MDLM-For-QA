@@ -204,6 +204,7 @@ def main():
     parser.add_argument("--use_vae", action="store_true", default=True)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--vae_warmup_epochs", type=int, default=None)
+    parser.add_argument("--vae_patience", type=int, default=3)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -214,6 +215,8 @@ def main():
     config.training.learning_rate = args.lr
     if args.vae_warmup_epochs is not None:
         config.training.vae_warmup_epochs = args.vae_warmup_epochs
+    if args.vae_patience is not None:
+        config.training.vae_patience = args.vae_patience
 
     # Initialize WandB
     wandb.init(
@@ -386,6 +389,8 @@ def main():
                 wandb.save(os.path.join(args.output_dir, "vae_warmup_best.pt"))
             else:
                 patience_counter += 1
+            
+            print(f"Patience: {patience_counter}/{config.training.vae_patience} (Best Val Loss: {best_vae_loss:.4f})")
                 
             if patience_counter >= config.training.vae_patience:
                 print(f"VAE converged after {epoch+1} epochs (patience reached).")
