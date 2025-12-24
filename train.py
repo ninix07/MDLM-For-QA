@@ -279,6 +279,9 @@ def main():
     )
     model = model.to(device)
     model.scheduler.to(device)
+    
+    # Watch model gradients and topology
+    wandb.watch(model, log="all", log_freq=100)
 
     print(f"Trainable parameters: {count_parameters(model):,}")
 
@@ -338,11 +341,18 @@ def main():
                         "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                     }
                 )
+                # Increment global step for VAE warmup too, or keep separate?
+                # User wants tracking on both. Let's log a step for VAE.
+                # We'll use a separate counter or the same global_step?
+                # If we use the same global_step, it might be confusing if we resume?
+                # Let's just log 'warmup/step' for now to be safe and explicit.
+                
                 wandb.log(
                     {
                         "warmup/vae_loss": metrics["vae_loss"],
                         "warmup/lr": scheduler.get_last_lr()[0],
                         "warmup/epoch": epoch,
+                        "warmup/step": batch_idx + epoch * len(train_loader),
                     }
                 )
             
@@ -355,6 +365,7 @@ def main():
                 patience_counter = 0
                 # Save warmup checkpoint
                 torch.save(model.state_dict(), os.path.join(args.output_dir, "vae_warmup_best.pt"))
+                wandb.save(os.path.join(args.output_dir, "vae_warmup_best.pt"))
             else:
                 patience_counter += 1
                 
@@ -478,6 +489,8 @@ def main():
                 os.path.join(args.output_dir, "best_model.pt"),
             )
             print(f"Saved best model with val loss: {val_loss:.4f}")
+            # Upload to WandB
+            wandb.save(os.path.join(args.output_dir, "best_model.pt"))
 
     print("Training complete!")
     wandb.finish()
