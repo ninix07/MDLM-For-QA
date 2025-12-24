@@ -43,7 +43,6 @@ uv.lock
 checkpoints/
 wandb/
 artifacts/
-data/
 # Data files
 data/*.json
 data/*.jsonl
