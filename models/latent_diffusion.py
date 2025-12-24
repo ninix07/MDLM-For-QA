@@ -209,7 +209,7 @@ class LatentDiffusionQA(nn.Module):
         # Requirement 2: Latent Calibration
         # Normalize latent if scaler is provided
         if self.scaler is not None:
-            z_0 = self.scaler.transform(z_0)
+            z_0 = self.scaler.transform(z_0, mask=answer_mask)
 
         # Diffusion training loss
         condition_kwargs = {
@@ -228,10 +228,8 @@ class LatentDiffusionQA(nn.Module):
             # But wait, the VAE produces a sequence.
             # If the answer is unanswerable, the input `answer_ids` should already be [NULL_ANS, PAD, PAD...]
             # So `z_0` computed from `answer_ids` is ALREADY the null latent sequence!
-            # The requirement says: "Ensure that for unanswerable questions, the Diffusion model's target x_0 is the VAE-encoded representation of the padded <NULL_ANS> sequence."
             # Since the data loader prepares unanswerable questions as [NULL_ANS] + [PAD]..., 
             # z_0 is already correct.
-            # However, we need to ensure we are NOT using the penalty heuristic.
             pass
 
         # Identify answerable questions (for logging or other logic if needed, but not for penalty)
@@ -246,12 +244,8 @@ class LatentDiffusionQA(nn.Module):
             z_0, 
             condition_kwargs, 
             mask=answer_mask,
-            # null_embedding=null_emb,  # Removed
-            # is_answerable=is_answerable, # Removed
-            # penalty_weight=... # Removed
         )
         diffusion_loss = diff_output["loss"]
-        # penalty_loss = diff_output.get("penalty", torch.tensor(0.0)) # Removed
         penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
         if self.use_vae:
@@ -304,6 +298,9 @@ class LatentDiffusionQA(nn.Module):
         # Requirement 2: Latent Calibration
         # Denormalize latent if scaler is provided
         if self.scaler is not None:
+            # We don't have a mask here during generation, but we can re-mask 
+            # if we had one. Usually we just denormalize everything.
+            # However, the user mentioned ensuring it's applied.
             z_0 = self.scaler.inverse_transform(z_0)
 
         # Decode to tokens

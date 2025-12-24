@@ -36,7 +36,7 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def train_step(
-    model, batch, optimizer, scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False
+    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False
 ):
     """Single training step with gradient accumulation support."""
     context_ids = batch["context_input_ids"].to(device)
@@ -46,11 +46,11 @@ def train_step(
     answer_ids = batch["answer_input_ids"].to(device)
     answer_mask = batch["answer_attention_mask"].to(device)
 
-    # Only zero gradients at the start of accumulation
+    # Zero gradients at the start of accumulation
     if step_idx % accumulation_steps == 0:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-    if use_amp and scaler is not None:
+    if use_amp and grad_scaler is not None:
         with autocast(device_type=device.type):
             outputs = model(
                 context_ids,
@@ -62,14 +62,14 @@ def train_step(
                 train_vae_only=train_vae_only,
             )
             loss = outputs["loss"] / accumulation_steps
-        scaler.scale(loss).backward()
+        grad_scaler.scale(loss).backward()
 
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
-            scaler.unscale_(optimizer)
+            grad_scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
     else:
         outputs = model(
             context_ids,
@@ -157,6 +157,12 @@ def validate(model, val_loader, device, train_vae_only=False):
     metrics = compute_metrics(all_predictions, all_references)
     metrics["loss"] = avg_loss
     
+    # Memory management
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+    
     return metrics
 
 
@@ -200,6 +206,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--vae_warmup_epochs", type=int, default=None)
     parser.add_argument("--vae_patience", type=int, default=3)
+    parser.add_argument("--force_vae_warmup", action="store_true", help="Force VAE warmup even if checkpoint exists")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -291,9 +298,14 @@ def main():
 
     print(f"Trainable parameters: {count_parameters(model):,}")
 
+    # Compute effective steps per epoch
+    accumulation_steps = config.training.gradient_accumulation_steps
+    steps_per_epoch = len(train_loader) // accumulation_steps
+    total_steps = steps_per_epoch * args.epochs
+
     # Optimizer and scheduler
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * args.epochs)
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
     # Only use AMP on CUDA
     use_amp = config.training.use_amp and device.type == "cuda"
     grad_scaler = GradScaler(amp_device) if use_amp else None
@@ -309,10 +321,17 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     best_val_loss = float("inf")
-    accumulation_steps = config.training.gradient_accumulation_steps
 
     # --- Phase 1: VAE Warmup ---
-    if config.training.vae_warmup_epochs > 0 and args.use_vae:
+    vae_checkpoint_path = os.path.join(args.output_dir, "vae_warmup_best.pt")
+    skip_warmup = False
+    
+    if os.path.exists(vae_checkpoint_path) and args.use_vae and not args.force_vae_warmup:
+        print(f"\n=== Found pre-trained VAE at {vae_checkpoint_path}. Skipping Warmup. ===")
+        model.load_state_dict(torch.load(vae_checkpoint_path, map_location=device))
+        skip_warmup = True
+    
+    if not skip_warmup and config.training.vae_warmup_epochs > 0 and args.use_vae:
         print(f"\n=== Starting VAE Warmup Phase ({config.training.vae_warmup_epochs} epochs) ===")
         best_vae_loss = float("inf")
         patience_counter = 0
@@ -395,9 +414,10 @@ def main():
                 print(f"VAE converged after {epoch+1} epochs (patience reached).")
                 break
         
-        # Load best VAE weights
-        print("Loading best VAE weights from warmup...")
-        model.load_state_dict(torch.load(os.path.join(args.output_dir, "vae_warmup_best.pt")))
+        if not skip_warmup:
+            # Load best VAE weights
+            print("Loading best VAE weights from warmup...")
+            model.load_state_dict(torch.load(os.path.join(args.output_dir, "vae_warmup_best.pt")))
 
     # Requirement 2: Latent Calibration
     # Fit scaler on training data using the trained VAE
@@ -418,8 +438,11 @@ def main():
         # We need to filter out frozen parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         optimizer = AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
-        # Re-init scheduler for diffusion phase
-        scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * args.epochs)
+        
+        # Re-init scheduler for diffusion phase with its own T_max
+        # Use a small warmup for the diffusion phase to stabilize the denoiser
+        diffusion_steps = steps_per_epoch * args.epochs
+        scheduler = CosineAnnealingLR(optimizer, T_max=diffusion_steps)
         
         print(f"Trainable parameters (Diffusion only): {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
