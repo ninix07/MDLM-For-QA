@@ -508,7 +508,7 @@ class SequenceVAE(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        kl_weight: float = 0.0,
+        kl_weight: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
         z, mean, logvar = self.encode(input_ids, attention_mask)
         decoded = self.decode(z)
