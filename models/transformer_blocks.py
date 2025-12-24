@@ -6,100 +6,62 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-
 class ConditionalTransformerBlock(nn.Module):
-    """
-    Transformer block with cross-attention for conditioning.
-
-    Structure:
-    1. Self-attention on noisy latent
-    2. Cross-attention with condition (Q + C)
-    3. Feed-forward network
-
-    All with residual connections, layer norm, and AdaLN timestep modulation.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        ff_dim: int,
-        dropout: float = 0.1,
-    ):
+    def __init__(self, d_model: int, num_heads: int, ff_dim: int, dropout: float = 0.1):
         super().__init__()
-
-        # Self-attention
-        self.self_attn = nn.MultiheadAttention(
-            d_model, num_heads, dropout=dropout, batch_first=True
-        )
-        self.self_attn_norm = nn.LayerNorm(d_model)
-
-        # Cross-attention with condition
-        self.cross_attn = nn.MultiheadAttention(
-            d_model, num_heads, dropout=dropout, batch_first=True
-        )
-        self.cross_attn_norm = nn.LayerNorm(d_model)
-
-        # Feed-forward
+        
+        # 1. Standard Transformer Components
+        self.self_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn_norm = nn.LayerNorm(d_model, elementwise_affine=False) # Norm logic handled by AdaLN
+        
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.cross_attn_norm = nn.LayerNorm(d_model, elementwise_affine=False)
+        
         self.ff = nn.Sequential(
             nn.Linear(d_model, ff_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(ff_dim, d_model),
-            nn.Dropout(dropout),
+            nn.Dropout(dropout)
         )
-        self.ff_norm = nn.LayerNorm(d_model)
+        self.ff_norm = nn.LayerNorm(d_model, elementwise_affine=False)
 
-        # Timestep modulation (AdaLN-style): scale, shift for 3 norms
+        # 2. AdaLN-Zero Timestep MLP
+        # Generates: [shift1, scale1, gate1, shift2, scale2, gate2] per attention/FF stage
+        # We need 3 sets (Self-Attn, Cross-Attn, Feed-Forward) -> 9 parameters
         self.time_mlp = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(d_model, d_model * 6),
+            nn.Linear(d_model, d_model * 9) 
         )
+        
+        # INITIALIZATION: Zero out the final layer to enforce Identity at start
+        nn.init.zeros_(self.time_mlp[1].weight)
+        nn.init.zeros_(self.time_mlp[1].bias)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        condition: torch.Tensor,
-        time_emb: torch.Tensor,
-        x_mask: Optional[torch.Tensor] = None,
-        condition_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            x: Noisy latent [batch, seq_len, d_model]
-            condition: Condition embeddings [batch, cond_len, d_model]
-            time_emb: Timestep embedding [batch, d_model]
-            x_mask: Key padding mask for x (True = ignore)
-            condition_mask: Key padding mask for condition (True = ignore)
-        Returns:
-            output: [batch, seq_len, d_model]
-        """
-        # Get modulation parameters from timestep
-        time_params = self.time_mlp(time_emb)
-        scale1, shift1, scale2, shift2, scale3, shift3 = time_params.chunk(6, dim=-1)
+    def modulate(self, x, shift, scale):
+        # Apply shift and scale to normalized input
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
-        # Self-attention with AdaLN
-        x_norm = self.self_attn_norm(x)
-        x_norm = x_norm * (1 + scale1.unsqueeze(1)) + shift1.unsqueeze(1)
-        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, key_padding_mask=x_mask)
-        x = x + attn_out
+    def forward(self, x, condition, time_emb, x_mask=None, condition_mask=None):
+        # A. Get AdaLN parameters for this timestep
+        t_out = self.time_mlp(time_emb)
+        sft1, scl1, gt1, sft2, scl2, gt2, sft3, scl3, gt3 = t_out.chunk(9, dim=-1)
 
-        # Cross-attention with condition
-        x_norm = self.cross_attn_norm(x)
-        x_norm = x_norm * (1 + scale2.unsqueeze(1)) + shift2.unsqueeze(1)
-        cross_out, _ = self.cross_attn(
-            x_norm, condition, condition, key_padding_mask=condition_mask
-        )
-        x = x + cross_out
+        # B. Self-Attention (Gated Residual)
+        h = self.modulate(self.self_attn_norm(x), sft1, scl1)
+        h, _ = self.self_attn(h, h, h, key_padding_mask=x_mask)
+        x = x + gt1.unsqueeze(1) * h
 
-        # Feed-forward with AdaLN
-        x_norm = self.ff_norm(x)
-        x_norm = x_norm * (1 + scale3.unsqueeze(1)) + shift3.unsqueeze(1)
-        x = x + self.ff(x_norm)
+        # C. Cross-Attention (Gated Residual)
+        h = self.modulate(self.cross_attn_norm(x), sft2, scl2)
+        h, _ = self.cross_attn(h, condition, condition, key_padding_mask=condition_mask)
+        x = x + gt2.unsqueeze(1) * h
+
+        # D. Feed-Forward (Gated Residual)
+        h = self.modulate(self.ff_norm(x), sft3, scl3)
+        x = x + gt3.unsqueeze(1) * self.ff(h)
 
         return x
-
-
 class SelfAttentionBlock(nn.Module):
     """Simple self-attention block without cross-attention."""
 

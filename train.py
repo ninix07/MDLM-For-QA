@@ -7,6 +7,7 @@ import json
 import random
 import argparse
 from datetime import datetime
+import wandb
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,8 @@ from tqdm import tqdm
 from config import Config, get_config
 from data import create_dataloader
 from models import LatentDiffusionQA
+from models.scaler import LatentScaler
+from metrics import compute_metrics
 
 
 def set_seed(seed: int):
@@ -33,7 +36,7 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def train_step(
-    model, batch, optimizer, scaler, device, use_amp, accumulation_steps=1, step_idx=0
+    model, batch, optimizer, scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False
 ):
     """Single training step with gradient accumulation support."""
     context_ids = batch["context_input_ids"].to(device)
@@ -56,6 +59,7 @@ def train_step(
                 question_mask,
                 answer_ids,
                 answer_mask,
+                train_vae_only=train_vae_only,
             )
             loss = outputs["loss"] / accumulation_steps
         scaler.scale(loss).backward()
@@ -74,6 +78,7 @@ def train_step(
             question_mask,
             answer_ids,
             answer_mask,
+            train_vae_only=train_vae_only,
         )
         loss = outputs["loss"] / accumulation_steps
         loss.backward()
@@ -87,15 +92,19 @@ def train_step(
         "loss": loss.item() * accumulation_steps,  # Return unscaled loss for logging
         "diff_loss": outputs["diffusion_loss"].item(),
         "vae_loss": outputs["vae_loss"].item(),
+        "penalty": outputs.get("penalty", torch.tensor(0.0)).item(),
     }
 
 
 @torch.no_grad()
 def validate(model, val_loader, device):
-    """Validation loop."""
+    """Validation loop with F1 and EM metrics."""
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    
+    all_predictions = []
+    all_references = []
 
     for batch in tqdm(val_loader, desc="Validating"):
         context_ids = batch["context_input_ids"].to(device)
@@ -105,6 +114,7 @@ def validate(model, val_loader, device):
         answer_ids = batch["answer_input_ids"].to(device)
         answer_mask = batch["answer_attention_mask"].to(device)
 
+        # 1. Compute Loss
         outputs = model(
             context_ids,
             context_mask,
@@ -115,8 +125,36 @@ def validate(model, val_loader, device):
         )
         total_loss += outputs["loss"].item()
         num_batches += 1
+        
+        # 2. Generate Answers (for metrics)
+        # Only generate for a subset if validation is too slow, but for now do all
+        gen_outputs = model.generate(
+            context_ids,
+            context_mask,
+            question_ids,
+            question_mask,
+            show_progress=False
+        )
+        
+        # Decode predictions
+        pred_texts = model.decode_tokens_to_text(gen_outputs["tokens"], gen_outputs["is_null"])
+        
+        # Decode ground truth
+        # Identify null answers in ground truth
+        null_token_id = model.null_ans_token_id
+        is_null_ref = (answer_ids[:, 0] == null_token_id)
+        ref_texts = model.decode_tokens_to_text(answer_ids, is_null_ref)
+        
+        all_predictions.extend(pred_texts)
+        all_references.extend(ref_texts)
 
-    return total_loss / max(num_batches, 1)
+    avg_loss = total_loss / max(num_batches, 1)
+    
+    # Compute metrics
+    metrics = compute_metrics(all_predictions, all_references)
+    metrics["loss"] = avg_loss
+    
+    return metrics
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, step, loss, path):
@@ -129,6 +167,8 @@ def save_checkpoint(model, optimizer, scheduler, epoch, step, loss, path):
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "loss": loss,
+            "scaler_mean": model.scaler.mean,
+            "scaler_std": model.scaler.std,
         },
         path,
     )
@@ -155,6 +195,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_vae", action="store_true", default=True)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--vae_warmup_epochs", type=int, default=None)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -163,6 +204,17 @@ def main():
     config.training.batch_size = args.batch_size
     config.training.num_epochs = args.epochs
     config.training.learning_rate = args.lr
+    if args.vae_warmup_epochs is not None:
+        config.training.vae_warmup_epochs = args.vae_warmup_epochs
+
+    # Initialize WandB
+    wandb.init(
+        project=config.wandb.project,
+        entity=config.wandb.entity,
+        name=config.wandb.name or f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        mode=config.wandb.mode,
+        config=vars(args),
+    )
 
     # Device selection: CUDA > MPS > CPU
     if torch.cuda.is_available():
@@ -205,6 +257,9 @@ def main():
 
     # Model
     print("Initializing model...")
+    # Requirement 2: Latent Calibration
+    scaler = LatentScaler()
+    
     model = LatentDiffusionQA(
         tokenizer=tokenizer,
         latent_dim=config.model.vae_latent_dim,
@@ -219,6 +274,8 @@ def main():
         schedule_type=config.diffusion.schedule_type,
         use_vae=args.use_vae,
         base_encoder=config.model.base_encoder,
+        false_negative_penalty_weight=config.training.false_negative_penalty_weight,
+        scaler=scaler,
     )
     model = model.to(device)
     model.scheduler.to(device)
@@ -245,6 +302,97 @@ def main():
     best_val_loss = float("inf")
     accumulation_steps = config.training.gradient_accumulation_steps
 
+    # --- Phase 1: VAE Warmup ---
+    if config.training.vae_warmup_epochs > 0 and args.use_vae:
+        print(f"\n=== Starting VAE Warmup Phase ({config.training.vae_warmup_epochs} epochs) ===")
+        best_vae_loss = float("inf")
+        patience_counter = 0
+        
+        for epoch in range(config.training.vae_warmup_epochs):
+            model.train()
+            epoch_vae_loss = 0.0
+            
+            pbar = tqdm(train_loader, desc=f"Warmup Epoch {epoch+1}/{config.training.vae_warmup_epochs}")
+            for batch_idx, batch in enumerate(pbar):
+                metrics = train_step(
+                    model,
+                    batch,
+                    optimizer,
+                    scaler,
+                    device,
+                    use_amp,
+                    accumulation_steps=accumulation_steps,
+                    step_idx=batch_idx,
+                    train_vae_only=True,
+                )
+                
+                # Only step scheduler after full accumulation
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    scheduler.step()
+                
+                epoch_vae_loss += metrics["vae_loss"]
+                
+                pbar.set_postfix(
+                    {
+                        "vae_loss": f"{metrics['vae_loss']:.4f}",
+                        "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                    }
+                )
+                wandb.log(
+                    {
+                        "warmup/vae_loss": metrics["vae_loss"],
+                        "warmup/lr": scheduler.get_last_lr()[0],
+                        "warmup/epoch": epoch,
+                    }
+                )
+            
+            avg_vae_loss = epoch_vae_loss / len(train_loader)
+            print(f"Warmup Epoch {epoch+1}: Avg VAE Loss = {avg_vae_loss:.4f}")
+            
+            # Check for convergence/early stopping
+            if avg_vae_loss < best_vae_loss:
+                best_vae_loss = avg_vae_loss
+                patience_counter = 0
+                # Save warmup checkpoint
+                torch.save(model.state_dict(), os.path.join(args.output_dir, "vae_warmup_best.pt"))
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= config.training.vae_patience:
+                print(f"VAE converged after {epoch+1} epochs (patience reached).")
+                break
+        
+        # Load best VAE weights
+        print("Loading best VAE weights from warmup...")
+        model.load_state_dict(torch.load(os.path.join(args.output_dir, "vae_warmup_best.pt")))
+
+    # Requirement 2: Latent Calibration
+    # Fit scaler on training data using the trained VAE
+    if args.use_vae:
+        print("\n=== Fitting Latent Scaler ===")
+        scaler.fit(train_loader, model.vae, device)
+
+    # --- Phase 2: Diffusion Training (Frozen VAE) ---
+    print("\n=== Starting Diffusion Training Phase ===")
+    
+    # Freeze VAE if using it
+    if args.use_vae:
+        print("Freezing VAE parameters...")
+        for p in model.vae.parameters():
+            p.requires_grad = False
+            
+        # Re-initialize optimizer for diffusion only
+        # We need to filter out frozen parameters
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
+        # Re-init scheduler for diffusion phase
+        scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * args.epochs)
+        
+        print(f"Trainable parameters (Diffusion only): {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
+    # Reset best val loss for diffusion phase
+    best_val_loss = float("inf")
+
     # Training loop
     for epoch in range(start_epoch, args.epochs):
         model.train()
@@ -261,6 +409,7 @@ def main():
                 use_amp,
                 accumulation_steps=accumulation_steps,
                 step_idx=batch_idx,
+                train_vae_only=False,
             )
             # Only step scheduler after full accumulation
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -274,7 +423,19 @@ def main():
                     "loss": f"{metrics['loss']:.4f}",
                     "diff": f"{metrics['diff_loss']:.4f}",
                     "vae": f"{metrics['vae_loss']:.4f}",
+                    "pen": f"{metrics['penalty']:.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                }
+            )
+            wandb.log(
+                {
+                    "train/loss": metrics["loss"],
+                    "train/diffusion_loss": metrics["diff_loss"],
+                    "train/vae_loss": metrics["vae_loss"],
+                    "train/penalty": metrics["penalty"],
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/epoch": epoch,
+                    "train/global_step": global_step,
                 }
             )
 
@@ -286,15 +447,24 @@ def main():
                     epoch,
                     global_step,
                     metrics["loss"],
-                    os.path.join(args.output_dir, f"checkpoint-{global_step}.pt"),
+                    os.path.join(args.output_dir, "checkpoint-last.pt"),
                 )
 
         avg_train_loss = epoch_loss / len(train_loader)
-        val_loss = validate(model, val_loader, device)
+        val_metrics = validate(model, val_loader, device)
+        val_loss = val_metrics["loss"]
+        val_f1 = val_metrics["f1"]
+        val_em = val_metrics["em"]
 
         print(
-            f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}"
+            f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}, F1 = {val_f1:.2f}, EM = {val_em:.2f}"
         )
+        wandb.log({
+            "val/loss": val_loss, 
+            "val/f1": val_f1,
+            "val/em": val_em,
+            "epoch": epoch
+        })
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -310,6 +480,7 @@ def main():
             print(f"Saved best model with val loss: {val_loss:.4f}")
 
     print("Training complete!")
+    wandb.finish()
 
 
 if __name__ == "__main__":

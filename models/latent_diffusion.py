@@ -12,6 +12,7 @@ from .vae import EmbeddingBridge, SequenceVAE
 from .denoiser import ConditionalDenoiser
 from .diffusion import NoiseScheduler, GaussianDiffusion
 from .sampler import DDIMSampler, CachedDDIMSampler
+from .scaler import LatentScaler
 
 
 class LatentDiffusionQA(nn.Module):
@@ -41,6 +42,8 @@ class LatentDiffusionQA(nn.Module):
         use_vae: bool = True,
         null_ans_token: str = "<NULL_ANS>",
         base_encoder: str = "xlm-roberta-base",
+        false_negative_penalty_weight: float = 1.0,
+        scaler: Optional[LatentScaler] = None,
     ):
         super().__init__()
 
@@ -48,7 +51,10 @@ class LatentDiffusionQA(nn.Module):
         self.latent_dim = latent_dim
         self.max_answer_len = max_answer_len
         self.null_ans_token = null_ans_token
+        self.null_ans_token = null_ans_token
         self.use_vae = use_vae
+        self.false_negative_penalty_weight = false_negative_penalty_weight
+        self.scaler = scaler
 
         # Ensure null answer token exists
         if null_ans_token not in tokenizer.get_vocab():
@@ -152,6 +158,7 @@ class LatentDiffusionQA(nn.Module):
         question_mask: torch.Tensor,
         answer_ids: torch.Tensor,
         answer_mask: torch.Tensor,
+        train_vae_only: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Training forward pass.
@@ -161,8 +168,24 @@ class LatentDiffusionQA(nn.Module):
             - diffusion_loss: MSE loss on noise prediction
             - vae_loss: VAE reconstruction + KL loss (if using VAE)
         """
+        vae_loss = torch.tensor(0.0, device=answer_ids.device)
+        if train_vae_only:
+            vae_output = self.vae.loss(answer_ids, answer_mask, kl_weight=0.1)
+            vae_loss = vae_output["loss"]
+            return {
+                "loss": vae_loss,
+                "diffusion_loss": torch.tensor(0.0, device=answer_ids.device),
+                "vae_loss": vae_loss,
+                "penalty": torch.tensor(0.0, device=answer_ids.device),
+            }
+
         # Encode answer to latent
         z_0 = self.encode_answer(answer_ids, answer_mask)
+
+        # Requirement 2: Latent Calibration
+        # Normalize latent if scaler is provided
+        if self.scaler is not None:
+            z_0 = self.scaler.transform(z_0)
 
         # Diffusion training loss
         condition_kwargs = {
@@ -172,24 +195,51 @@ class LatentDiffusionQA(nn.Module):
             "question_mask": question_mask,
         }
 
+        # Requirement 3: SQuAD 2.0 'Null-Sink' Logic
+        # For unanswerable questions, target x_0 is the VAE-encoded <NULL_ANS> sequence
+        if self.use_vae:
+            # Get null answer embedding (latent)
+            null_ids = torch.tensor([[self.null_ans_token_id]], device=answer_ids.device)
+            # We need a sequence of null latents matching the answer length
+            # But wait, the VAE produces a sequence.
+            # If the answer is unanswerable, the input `answer_ids` should already be [NULL_ANS, PAD, PAD...]
+            # So `z_0` computed from `answer_ids` is ALREADY the null latent sequence!
+            # The requirement says: "Ensure that for unanswerable questions, the Diffusion model's target x_0 is the VAE-encoded representation of the padded <NULL_ANS> sequence."
+            # Since the data loader prepares unanswerable questions as [NULL_ANS] + [PAD]..., 
+            # z_0 is already correct.
+            # However, we need to ensure we are NOT using the penalty heuristic.
+            pass
+
+        # Identify answerable questions (for logging or other logic if needed, but not for penalty)
+        is_unanswerable = (answer_ids[:, 0] == self.null_ans_token_id)
+        is_answerable = ~is_unanswerable
+
+        # Remove penalty logic
+        # We pass is_answerable just for info if needed, but diffusion loss handles it naturally
+        
         diff_output = self.diffusion.training_loss(
-            self.denoiser, z_0, condition_kwargs, mask=answer_mask
+            self.denoiser, 
+            z_0, 
+            condition_kwargs, 
+            mask=answer_mask,
+            # null_embedding=null_emb,  # Removed
+            # is_answerable=is_answerable, # Removed
+            # penalty_weight=... # Removed
         )
         diffusion_loss = diff_output["loss"]
+        # penalty_loss = diff_output.get("penalty", torch.tensor(0.0)) # Removed
+        penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
-        # VAE loss (if using VAE)
         if self.use_vae:
-            vae_output = self.vae.loss(answer_ids, answer_mask, kl_weight=0.1)
-            vae_loss = vae_output["loss"]
             total_loss = diffusion_loss + 0.1 * vae_loss
         else:
-            vae_loss = torch.tensor(0.0, device=diffusion_loss.device)
             total_loss = diffusion_loss
 
         return {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
             "vae_loss": vae_loss,
+            "penalty": penalty_loss
         }
 
     @torch.no_grad()
@@ -227,6 +277,11 @@ class LatentDiffusionQA(nn.Module):
             show_progress=show_progress,
         )
 
+        # Requirement 2: Latent Calibration
+        # Denormalize latent if scaler is provided
+        if self.scaler is not None:
+            z_0 = self.scaler.inverse_transform(z_0)
+
         # Decode to tokens
         tokens = self.decode_latent(z_0, return_tokens=True)
 
@@ -234,12 +289,11 @@ class LatentDiffusionQA(nn.Module):
         null_emb = self.get_null_ans_embedding(device)
 
         # Pool latent for comparison (mean over sequence)
-        z_pooled = z_0.mean(dim=1)
-        null_emb_expanded = null_emb.mean(dim=0) if null_emb.dim() > 1 else null_emb
+        z_sink = z_0[:, 0, :] 
+        null_sink = null_emb[0, :] if null_emb.dim() > 1 else null_emb
 
-        # Cosine similarity
-        z_norm = F.normalize(z_pooled, p=2, dim=-1)
-        null_norm = F.normalize(null_emb_expanded.unsqueeze(0), p=2, dim=-1)
+        z_norm = F.normalize(z_sink, p=2, dim=-1)
+        null_norm = F.normalize(null_sink.unsqueeze(0), p=2, dim=-1)
         null_similarity = (z_norm * null_norm).sum(dim=-1)
 
         is_null = null_similarity > null_threshold

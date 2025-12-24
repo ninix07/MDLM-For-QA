@@ -49,7 +49,7 @@ class NoiseScheduler:
             betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
         self.posterior_log_variance_clipped = torch.log(
-            torch.clamp(self.posterior_variance, min=1e-20)
+            torch.clamp(self.posterior_variance, min=1e-12)
         )
         self.posterior_mean_coef1 = (
             betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
@@ -196,11 +196,46 @@ class GaussianDiffusion(nn.Module):
 
         noise_pred = model(z_t, t, **condition_kwargs)
 
+        # Requirement 5: Min-SNR Weighted MSE Loss
+        # SNR(t) = alpha_bar_t / (1 - alpha_bar_t)
+        alphas_cumprod = self.scheduler.alphas_cumprod.to(device)
+        alpha_bar_t = alphas_cumprod[t]
+        snr = alpha_bar_t / (1 - alpha_bar_t)
+        
+        # Weighting: min(SNR, gamma) / SNR
+        # Standard formulation for epsilon prediction is usually just min(SNR, gamma) if loss is on epsilon?
+        # Wait, for epsilon prediction, the standard simple loss is just MSE(eps, eps_pred).
+        # Min-SNR weighting strategy (Hang et al. 2023) suggests weighting the loss term.
+        # For epsilon prediction, L_simple corresponds to SNR weighting of 1.
+        # Min-SNR strategy: weight = min(SNR, gamma) / SNR.
+        # Since we are predicting epsilon, the "natural" weight is 1.
+        # If we want to prioritize critical timesteps, we use the Min-SNR weight.
+        
+        # Min-SNR weighting strategy
+        gamma = 5.0
+        snr = alpha_bar_t / (1 - alpha_bar_t)
+        # Stable weighting: weight = min(snr, gamma) / snr
+        # For epsilon prediction, the weight effectively clips the importance of low-SNR timesteps
+        mse_weight = torch.stack([snr, torch.full_like(snr, gamma)], dim=0).min(dim=0)[0] / snr
+
+        # Expand for element-wise multiplication: [batch, 1, 1]
+        mse_weight = mse_weight.view(-1, 1, 1)
+        
         if mask is not None:
             mask = mask.unsqueeze(-1).float()
-            loss = F.mse_loss(noise_pred * mask, noise * mask, reduction="sum")
-            loss = loss / mask.sum().clamp(min=1)
+            loss = F.mse_loss(noise_pred, noise, reduction="none")
+            # Apply weight and mask
+            loss = (loss * mse_weight * mask).sum() / mask.sum().clamp(min=1)
         else:
-            loss = F.mse_loss(noise_pred, noise)
+            loss = (F.mse_loss(noise_pred, noise, reduction="none") * mse_weight).mean()
 
-        return {"loss": loss, "noise_pred": noise_pred, "noise": noise, "t": t}
+        # Requirement 5: Min-SNR Weighted MSE Loss
+        # We will implement this in the next step, for now just standard MSE
+        # But we removed the penalty logic as per Requirement 3.
+
+        return {
+            "loss": loss,
+            "noise_pred": noise_pred,
+            "noise": noise,
+            "t": t,
+        }

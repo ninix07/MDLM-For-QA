@@ -54,7 +54,7 @@ class DDPMSampler:
             pred_x0 = (z_t - torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(
                 alpha_bar
             )
-            pred_x0 = torch.clamp(pred_x0, -1, 1)
+            
 
             coef1 = (
                 torch.sqrt(alpha_bar_prev) * self.scheduler.betas[t] / (1 - alpha_bar)
@@ -205,7 +205,8 @@ class CachedDDIMSampler:
                 t_prev = self.timesteps[i + 1]
                 alpha_bar_prev = self.scheduler.alphas_cumprod[t_prev]
             else:
-                alpha_bar_prev = torch.tensor(1.0, device=device)
+                # Use the first value of alphas_cumprod (clean state)
+                alpha_bar_prev = self.scheduler.alphas_cumprod_prev[0]
 
             pred_x0 = (z_t - torch.sqrt(1 - alpha_bar) * noise_pred) / torch.sqrt(
                 alpha_bar

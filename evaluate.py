@@ -283,8 +283,16 @@ def main():
         model, data_loader, dataset, device, args.null_threshold
     )
 
+    # Log prediction statistics
+    num_predicted_answerable = sum(1 for p in predictions.values() if p != "")
+    num_predicted_unanswerable = sum(1 for p in predictions.values() if p == "")
+    print(f"\nPrediction Statistics:")
+    print(f"  Answerable: {num_predicted_answerable}")
+    print(f"  Unanswerable: {num_predicted_unanswerable}")
+    print(f"  Ratio (Unanswerable): {num_predicted_unanswerable / (num_predicted_answerable + num_predicted_unanswerable):.2%}")
+
     # Compute metrics
-    metrics = compute_metrics(predictions, ground_truths, no_answer_probs, 0.5)
+    metrics = compute_metrics(predictions, ground_truths, no_answer_probs, args.null_threshold)
 
     # Compute ROUGE and BLEU
     print("Computing ROUGE and BLEU scores...")

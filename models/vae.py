@@ -464,6 +464,12 @@ class SequenceVAE(nn.Module):
         eps = torch.randn_like(std)
         z = mean + eps * std
 
+        # Requirement 1: VAE Robustness & Local Isometry
+        # Inject additional noise during training to bridge gap with diffusion
+        if self.training:
+            noise_injection = torch.randn_like(z) * 0.05
+            z = z + noise_injection
+
         return z, mean, logvar
 
     def decode(self, z: torch.Tensor, return_hidden: bool = False) -> torch.Tensor:
@@ -478,7 +484,9 @@ class SequenceVAE(nn.Module):
             hidden: [batch, seq_len, embedding_dim]
         """
         x = self.from_latent(z)
-        decoded = self.decoder(x)
+        sz=x.size(1)
+        mask = nn.Transformer.generate_square_subsequent_mask(sz).to(x.device)
+        decoded = self.decoder(x,mask=mask)
         return decoded
 
     def forward(
@@ -500,7 +508,7 @@ class SequenceVAE(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        kl_weight: float = 0.1,
+        kl_weight: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         z, mean, logvar = self.encode(input_ids, attention_mask)
         decoded = self.decode(z)

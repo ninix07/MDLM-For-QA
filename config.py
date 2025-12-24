@@ -29,9 +29,9 @@ class ModelConfig:
     vae_hidden_dim: int = 512
 
     # Max sequence lengths
-    max_context_length: int = 256  # Reduced from 384 for memory
-    max_question_length: int = 48  # Reduced from 64 for memory
-    max_answer_length: int = 32  # Reduced from 64 for memory
+    max_context_length: int = 512  # Increased from 384
+    max_question_length: int = 100  # Increased from 64
+    max_answer_length: int = 100  # Increased from 64
 
     # Special tokens
     null_ans_token: str = "<NULL_ANS>"
@@ -97,9 +97,16 @@ class TrainingConfig:
     use_embedding_loss: bool = True
     embedding_loss_weight: float = 0.1
 
+    # False negative penalty (penalize predicting no answer when answerable)
+    false_negative_penalty_weight: float = 1.0
+
     # Checkpointing
     output_dir: str = "./checkpoints"
     resume_from: Optional[str] = None
+
+    # VAE Warmup
+    vae_warmup_epochs: int = 20
+    vae_patience: int = 5
 
 
 @dataclass
@@ -124,6 +131,15 @@ class InferenceConfig:
 
 
 @dataclass
+class WandbConfig:
+    """Weights & Biases configuration."""
+    project: str = "mdlm-squad"
+    entity: Optional[str] = None
+    name: Optional[str] = None
+    mode: str = "online"  # "online", "offline", "disabled"
+
+
+@dataclass
 class Config:
     """Main configuration combining all sub-configs."""
 
@@ -131,6 +147,7 @@ class Config:
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    wandb: WandbConfig = field(default_factory=WandbConfig)
 
     # Device
     device: str = "cuda"
