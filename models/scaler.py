@@ -37,8 +37,8 @@ class LatentScaler:
                 z = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
                 
                 # Mask out padding
-                mask = answer_mask.unsqueeze(-1).bool()
-                z_masked = z[mask].view(-1, z.shape[-1])
+                mask = answer_mask.bool()
+                z_masked = z[mask]
                 
                 all_latents.append(z_masked.cpu())
         
