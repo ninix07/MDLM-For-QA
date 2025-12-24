@@ -258,7 +258,7 @@ def main():
     # Model
     print("Initializing model...")
     # Requirement 2: Latent Calibration
-    scaler = LatentScaler()
+    latent_scaler = LatentScaler()
     
     model = LatentDiffusionQA(
         tokenizer=tokenizer,
@@ -275,7 +275,7 @@ def main():
         use_vae=args.use_vae,
         base_encoder=config.model.base_encoder,
         false_negative_penalty_weight=config.training.false_negative_penalty_weight,
-        scaler=scaler,
+        scaler=latent_scaler,
     )
     model = model.to(device)
     model.scheduler.to(device)
@@ -290,7 +290,7 @@ def main():
     scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * args.epochs)
     # Only use AMP on CUDA
     use_amp = config.training.use_amp and device.type == "cuda"
-    scaler = GradScaler(amp_device) if use_amp else None
+    grad_scaler = GradScaler(amp_device) if use_amp else None
 
     # Resume from checkpoint
     start_epoch = 0
@@ -321,7 +321,7 @@ def main():
                     model,
                     batch,
                     optimizer,
-                    scaler,
+                    grad_scaler,
                     device,
                     use_amp,
                     accumulation_steps=accumulation_steps,
@@ -381,7 +381,7 @@ def main():
     # Fit scaler on training data using the trained VAE
     if args.use_vae:
         print("\n=== Fitting Latent Scaler ===")
-        scaler.fit(train_loader, model.vae, device)
+        latent_scaler.fit(train_loader, model.vae, device)
 
     # --- Phase 2: Diffusion Training (Frozen VAE) ---
     print("\n=== Starting Diffusion Training Phase ===")
@@ -415,7 +415,7 @@ def main():
                 model,
                 batch,
                 optimizer,
-                scaler,
+                grad_scaler,
                 device,
                 use_amp,
                 accumulation_steps=accumulation_steps,
