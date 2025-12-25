@@ -392,7 +392,7 @@ class SequenceVAE(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.1,
         pretrained_embeddings: Optional[nn.Embedding] = None,
-        pad_token_id: int = 1,
+        pad_token_id: int = 0,
     ):
         super().__init__()
        

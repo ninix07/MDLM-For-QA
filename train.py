@@ -351,8 +351,7 @@ def main():
 
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
-    tokenizer.pad_token = "[unused0]"
-    config.model.pad_token_id = tokenizer.pad_token_id
+    config.model.pad_token_id = 0
     # Data loaders
     print("Loading training data...")
     train_loader, train_dataset = create_dataloader(
