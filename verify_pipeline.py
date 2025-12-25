@@ -1,16 +1,5 @@
-"""
-End-to-End Pipeline Verification Script
-
-Traces data through:
-1. BERT Embedding
-2. VAE Encoder (with latent sampling)
-3. Diffusion Training / Inference
-4. VAE Decoder
-5. Nearest Token Lookup
-6. Final Text Output
-"""
-
 import torch
+import random
 from transformers import AutoTokenizer
 import config
 from models.latent_diffusion import LatentDiffusionQA
@@ -41,10 +30,15 @@ def verify_pipeline():
     ).to(device)
     model.eval()
     
-    # Sample input
-    answer_text = "The quick brown fox"
-    context_text = "A fox jumped over a lazy dog."
-    question_text = "What jumped over the dog?"
+    # Sample RANDOM input from a predefined list
+    sample_qa = random.choice([
+        ("The quick brown fox", "A fox jumped over a lazy dog.", "What jumped over the dog?"),
+        ("Paris", "Paris is the capital of France.", "What is the capital of France?"),
+        ("1969", "Neil Armstrong walked on the moon in 1969.", "When did Armstrong walk on the moon?"),
+        ("Albert Einstein", "Einstein developed the theory of relativity.", "Who developed the theory of relativity?"),
+        ("hydrogen and oxygen", "Water is made of hydrogen and oxygen.", "What is water made of?"),
+    ])
+    answer_text, context_text, question_text = sample_qa
     
     print(f"\n[2] INPUT DATA")
     print(f"    Answer: '{answer_text}'")

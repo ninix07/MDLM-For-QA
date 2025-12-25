@@ -229,14 +229,19 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             all_predictions.extend(pred_texts)
             all_references.extend(ref_texts)
             
+            # Show debug for a random batch (not always batch 0)
+            import random
             if num_batches == 1:
-                print(f"\n[DEBUG] Batch 0:")
-                print(f"Answer IDs: {answer_ids[0, :10].tolist()}")
-                print(f"Gen Tokens: {gen_outputs['tokens'][0, :10].tolist()}")
-                print(f"Pred Text: '{pred_texts[0]}'")
-                print(f"Ref Text: '{ref_texts[0]}'")
-                print(f"Is Null Ref: {is_null_ref[0]}")
-                print(f"Is Null Pred: {gen_outputs['is_null'][0]}")
+                debug_batch_idx = random.randint(1, min(max_metric_batches, 10))
+            if num_batches == debug_batch_idx:
+                sample_idx = random.randint(0, len(pred_texts) - 1)
+                print(f"\n[DEBUG] Random Batch {num_batches}, Sample {sample_idx}:")
+                print(f"Answer IDs: {answer_ids[sample_idx, :10].tolist()}")
+                print(f"Gen Tokens: {gen_outputs['tokens'][sample_idx, :10].tolist()}")
+                print(f"Pred Text: '{pred_texts[sample_idx]}'")
+                print(f"Ref Text: '{ref_texts[sample_idx]}'")
+                print(f"Is Null Ref: {is_null_ref[sample_idx]}")
+                print(f"Is Null Pred: {gen_outputs['is_null'][sample_idx]}")
 
     avg_loss = total_loss / max(num_batches, 1)
     

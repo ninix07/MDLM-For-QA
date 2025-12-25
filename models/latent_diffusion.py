@@ -64,18 +64,18 @@ class LatentDiffusionQA(nn.Module):
         self.null_ans_token_id = tokenizer.convert_tokens_to_ids(null_ans_token)
 
         vocab_size = len(tokenizer)
-        embedding_dim = 768  # XLM-R base hidden size
+        embedding_dim = 768  # BERT base hidden size (always 768, not d_model)
 
         # VAE or Embedding Bridge
         if use_vae:
             self.vae = SequenceVAE(
                 vocab_size=len(tokenizer),
-                embedding_dim=d_model,
+                embedding_dim=embedding_dim,  # Use actual BERT dim (768), not d_model
                 latent_dim=latent_dim,
                 num_layers=4,
                 num_heads=8,
                 dropout=dropout,
-                pretrained_embeddings=None, # Assuming `bridge` is not defined here, setting to None or removing if not needed.
+                pretrained_embeddings=None,
                 pad_token_id=tokenizer.pad_token_id,
             )
             actual_latent_dim = latent_dim
