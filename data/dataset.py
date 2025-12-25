@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 
 
 @dataclass
@@ -37,7 +37,7 @@ class SQuAD2Dataset(Dataset):
     def __init__(
         self,
         data_path: str,
-        tokenizer: XLMRobertaTokenizer,
+        tokenizer: AutoTokenizer,
         max_context_length: int = 384,
         max_question_length: int = 64,
         max_answer_length: int = 64,
@@ -237,7 +237,7 @@ class BalancedSQuADSampler(Sampler):
 
 def create_dataloader(
     data_path: str,
-    tokenizer: XLMRobertaTokenizer,
+    tokenizer: AutoTokenizer,
     batch_size: int,
     max_context_length: int = 384,
     max_question_length: int = 64,

@@ -88,3 +88,6 @@ dmypy.json
 *.tmp
 .env
 .env.local
+
+
+*.txt

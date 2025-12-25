@@ -11,10 +11,10 @@ class ModelConfig:
     """Model architecture configuration."""
 
     # Base encoder for multilingual support
-    base_encoder: str = "xlm-roberta-base"
+    base_encoder: str = "bert-base-uncased"
 
-    # Latent dimensions
-    latent_dim: int = 768  # Match XLM-R hidden size
+    # Latent dimensions (VAE compresses to this)
+    latent_dim: int = 256  # VAE latent dimension (smaller than embedding_dim)
 
     # Denoiser Transformer config
     denoiser_layers: int = 4  # Reduced from 6 for memory

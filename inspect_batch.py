@@ -1,12 +1,12 @@
 
 import torch
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 from data import create_dataloader
 from config import get_config
 
 def inspect_data():
     config = get_config()
-    tokenizer = XLMRobertaTokenizer.from_pretrained(config.model.base_encoder)
+    tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
     
     # Ensure null token is added as in the model
     null_ans_token = "<NULL_ANS>"

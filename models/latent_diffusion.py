@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 
 from .vae import EmbeddingBridge, SequenceVAE
 from .denoiser import ConditionalDenoiser
@@ -28,7 +28,7 @@ class LatentDiffusionQA(nn.Module):
 
     def __init__(
         self,
-        tokenizer: XLMRobertaTokenizer,
+        tokenizer: AutoTokenizer,
         latent_dim: int = 256,
         d_model: int = 768,
         num_layers: int = 6,
@@ -69,12 +69,14 @@ class LatentDiffusionQA(nn.Module):
         # VAE or Embedding Bridge
         if use_vae:
             self.vae = SequenceVAE(
-                vocab_size=vocab_size,
-                embedding_dim=embedding_dim,
+                vocab_size=len(tokenizer),
+                embedding_dim=d_model,
                 latent_dim=latent_dim,
                 num_layers=4,
                 num_heads=8,
                 dropout=dropout,
+                pretrained_embeddings=None, # Assuming `bridge` is not defined here, setting to None or removing if not needed.
+                pad_token_id=tokenizer.pad_token_id,
             )
             actual_latent_dim = latent_dim
         else:

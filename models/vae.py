@@ -12,7 +12,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import XLMRobertaModel, XLMRobertaConfig
+from transformers import AutoModel, AutoConfig
 
 
 class EmbeddingBridge(nn.Module):
@@ -30,17 +30,17 @@ class EmbeddingBridge(nn.Module):
     ):
         super().__init__()
 
-        # Load XLM-R model for embeddings
-        self.xlmr = XLMRobertaModel.from_pretrained(model_name)
-        self.embedding_dim = self.xlmr.config.hidden_size
+        # Load model for embeddings (supports any HuggingFace model)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.embedding_dim = self.model.config.hidden_size
 
         if freeze_embeddings:
-            for param in self.xlmr.embeddings.parameters():
+            for param in self.model.embeddings.parameters():
                 param.requires_grad = False
 
     def get_embeddings(self) -> nn.Embedding:
         """Get the word embedding layer."""
-        return self.xlmr.embeddings.word_embeddings
+        return self.model.embeddings.word_embeddings
 
     def encode(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -52,7 +52,7 @@ class EmbeddingBridge(nn.Module):
         Returns:
             embeddings: [batch_size, seq_len, embedding_dim]
         """
-        return self.xlmr.embeddings.word_embeddings(input_ids)
+        return self.model.embeddings.word_embeddings(input_ids)
 
     def decode(
         self,
@@ -71,7 +71,7 @@ class EmbeddingBridge(nn.Module):
         """
         # Get embedding matrix
         embedding_weight = (
-            self.xlmr.embeddings.word_embeddings.weight
+            self.model.embeddings.word_embeddings.weight
         )  # [vocab_size, dim]
 
         # Normalize for cosine similarity
@@ -314,7 +314,7 @@ class TextVAE(nn.Module):
             logits.view(-1, self.vocab_size),
             input_ids.view(-1),
             reduction="mean",
-            ignore_index=1,  # XLM-R pad token id
+            ignore_index=self.pad_token_id,
         )
 
         # KL divergence loss
@@ -392,12 +392,14 @@ class SequenceVAE(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.1,
         pretrained_embeddings: Optional[nn.Embedding] = None,
+        pad_token_id: int = 1,
     ):
         super().__init__()
 
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.latent_dim = latent_dim
+        self.pad_token_id = pad_token_id
 
         # Embeddings
         if pretrained_embeddings is not None:

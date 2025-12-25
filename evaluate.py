@@ -11,7 +11,7 @@ from collections import Counter
 from typing import Dict, List, Tuple
 
 import torch
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 from tqdm import tqdm
 import wandb
 import evaluate
@@ -237,13 +237,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load tokenizer
-    tokenizer = XLMRobertaTokenizer.from_pretrained(config.model.base_encoder)
+    tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
 
     # Load model
     print("Loading model...")
     model = LatentDiffusionQA(
         tokenizer=tokenizer,
-        latent_dim=config.model.vae_latent_dim,
+        latent_dim=config.model.latent_dim,
         d_model=config.model.denoiser_dim,
         num_layers=config.model.denoiser_layers,
         num_heads=config.model.denoiser_heads,

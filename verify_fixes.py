@@ -1,12 +1,15 @@
 import torch
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 from models.latent_diffusion import LatentDiffusionQA
 from train import get_kl_weight, validate
 from models.scaler import LatentScaler
 
+import config
+
 def test_fixes():
     print("Initializing model...")
-    tokenizer = XLMRobertaTokenizer.from_pretrained("xlm-roberta-base")
+    cfg = config.get_config()
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base_encoder)
     scaler = LatentScaler()
     # Mock scaler stats
     scaler.mean = torch.zeros(256)
@@ -125,7 +128,7 @@ def test_fixes():
     dummy_loader = [dummy_batch]
     
     # Test with default KL (should be 0.1)
-    val_metrics_default = validate(model, dummy_loader, latents.device, train_vae_only=True, max_metric_batches=0)
+    val_metrics_default = validate(model, dummy_loader, latents.device, train_vae_only=True, max_metric_batches=1)
     print(f"Val Loss (Default KL=0.1): {val_metrics_default['loss']:.4f}")
     
     if "recon_loss" in val_metrics_default:

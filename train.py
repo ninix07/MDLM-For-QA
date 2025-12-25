@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.amp import GradScaler, autocast
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 from tqdm import tqdm
 
 from config import Config, get_config
@@ -203,6 +203,15 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             
             all_predictions.extend(pred_texts)
             all_references.extend(ref_texts)
+            
+            if num_batches == 1:
+                print(f"\n[DEBUG] Batch 0:")
+                print(f"Answer IDs: {answer_ids[0, :10].tolist()}")
+                print(f"Gen Tokens: {gen_outputs['tokens'][0, :10].tolist()}")
+                print(f"Pred Text: '{pred_texts[0]}'")
+                print(f"Ref Text: '{ref_texts[0]}'")
+                print(f"Is Null Ref: {is_null_ref[0]}")
+                print(f"Is Null Pred: {gen_outputs['is_null'][0]}")
 
     avg_loss = total_loss / max(num_batches, 1)
     
@@ -306,7 +315,7 @@ def main():
     print(f"Using device: {device}")
 
     # Tokenizer
-    tokenizer = XLMRobertaTokenizer.from_pretrained(config.model.base_encoder)
+    tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
 
     # Data loaders
     print("Loading training data...")

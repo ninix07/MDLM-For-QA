@@ -4,7 +4,7 @@ Inference script for interactive question answering.
 
 import argparse
 import torch
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 
 from config import get_config
 from models import LatentDiffusionQA
@@ -26,7 +26,7 @@ class QAInference:
         self.null_threshold = null_threshold
 
         # Load tokenizer
-        self.tokenizer = XLMRobertaTokenizer.from_pretrained(
+        self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model.base_encoder
         )
 

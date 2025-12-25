@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from transformers import XLMRobertaTokenizer
+from transformers import AutoTokenizer
 from models.latent_diffusion import LatentDiffusionQA
 from models.scaler import LatentScaler
 import config
@@ -10,7 +10,7 @@ def load_model():
     print("Initializing model...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = config.get_config()
-    tokenizer = XLMRobertaTokenizer.from_pretrained(cfg.model.base_encoder)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.base_encoder)
     
     model = LatentDiffusionQA(
         tokenizer=tokenizer,
