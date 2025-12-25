@@ -25,13 +25,13 @@ class ModelConfig:
 
     # VAE config (if using Approach B)
     use_vae: bool = True
-    vae_latent_dim: int = 256
+    vae_latent_dim: int = 128
     vae_hidden_dim: int = 512
 
     # Max sequence lengths
     max_context_length: int = 512  # Increased from 384
     max_question_length: int = 100  # Increased from 64
-    max_answer_length: int = 100  # Increased from 64
+    max_answer_length: int = 64  # Increased from 64
 
     # Special tokens
     null_ans_token: str = "<NULL_ANS>"
@@ -43,7 +43,7 @@ class DiffusionConfig:
     """Diffusion process configuration."""
 
     # Number of diffusion steps
-    num_train_timesteps: int = 1000
+    num_train_timesteps: int = 2000
     num_inference_timesteps: int = 50  # DDIM sampling
 
     # Noise schedule type: 'linear', 'cosine', 'sqrt'
@@ -70,10 +70,10 @@ class TrainingConfig:
 
     # Batch size (reduced for memory - use gradient accumulation for effective larger batch)
     batch_size: int = 8
-    gradient_accumulation_steps: int = 4  # Effective batch size = 32
+    gradient_accumulation_steps: int = 8  # Effective batch size = 32
 
     # Learning rate
-    learning_rate: float = 1e-4
+    learning_rate: float = 5e-5
     weight_decay: float = 0.01
     warmup_steps: int = 1000
     max_grad_norm: float = 1.0
@@ -91,21 +91,21 @@ class TrainingConfig:
     use_amp: bool = True
 
     # Balanced batching for SQuAD 2.0
-    answerable_ratio: float = 0.5  # 50% answerable, 50% unanswerable
+    answerable_ratio: float = 0.5 # 65% answerable, 35% unanswerable
 
     # Auxiliary loss to keep latents close to valid embeddings
     use_embedding_loss: bool = True
     embedding_loss_weight: float = 0.1
 
     # False negative penalty (penalize predicting no answer when answerable)
-    false_negative_penalty_weight: float = 1.0
+    false_negative_penalty_weight: float = 3.0
 
     # Checkpointing
     output_dir: str = "./checkpoints"
     resume_from: Optional[str] = None
 
     # VAE Warmup
-    vae_warmup_epochs: int = 20
+    vae_warmup_epochs: int = 40
     vae_patience: int = 5
 
 
@@ -120,7 +120,7 @@ class InferenceConfig:
     guidance_scale: float = 1.0
 
     # Null answer threshold
-    null_ans_threshold: float = 0.7  # Cosine similarity threshold
+    null_ans_threshold: float = 0.6# Cosine similarity threshold
 
     # Temperature for sampling
     temperature: float = 1.0

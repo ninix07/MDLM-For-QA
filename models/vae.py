@@ -395,7 +395,7 @@ class SequenceVAE(nn.Module):
         pad_token_id: int = 1,
     ):
         super().__init__()
-
+       
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.latent_dim = latent_dim
@@ -544,7 +544,7 @@ class SequenceVAE(nn.Module):
                 chunk_logits.reshape(-1, self.vocab_size),
                 chunk_targets.reshape(-1),
                 reduction="sum",
-                ignore_index=1,  # XLM-R pad token id
+                ignore_index=self.pad_token_id
             )
             recon_loss = recon_loss + chunk_loss
 

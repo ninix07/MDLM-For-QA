@@ -214,7 +214,7 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                     question_ids,
                     question_mask,
                     show_progress=False,
-                    num_inference_steps=20
+                    num_inference_steps=config.training.num_inference_steps
                 )
             
             # Decode predictions
@@ -351,7 +351,8 @@ def main():
 
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
-
+    tokenizer.pad_token = "[unused0]"
+    config.model.pad_token_id = tokenizer.pad_token_id
     # Data loaders
     print("Loading training data...")
     train_loader, train_dataset = create_dataloader(

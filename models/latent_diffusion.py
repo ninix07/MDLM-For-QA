@@ -29,7 +29,7 @@ class LatentDiffusionQA(nn.Module):
     def __init__(
         self,
         tokenizer: AutoTokenizer,
-        latent_dim: int = 256,
+        latent_dim: int = 128,
         d_model: int = 768,
         num_layers: int = 6,
         num_heads: int = 8,
@@ -48,6 +48,7 @@ class LatentDiffusionQA(nn.Module):
         super().__init__()
 
         self.tokenizer = tokenizer
+        self.pad_token_id = tokenizer.pad_token_id
         self.latent_dim = latent_dim
         self.max_answer_len = max_answer_len
         self.null_ans_token = null_ans_token
@@ -76,7 +77,7 @@ class LatentDiffusionQA(nn.Module):
                 num_heads=8,
                 dropout=dropout,
                 pretrained_embeddings=None,
-                pad_token_id=tokenizer.pad_token_id,
+                pad_token_id=self.pad_token_id,
             )
             actual_latent_dim = latent_dim
         else:

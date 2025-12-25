@@ -17,8 +17,8 @@ class ConditionalDenoiser(nn.Module):
 
     def __init__(
         self,
-        latent_dim: int = 768,
-        d_model: int = 768,
+        latent_dim: int = 256,
+        d_model: int = 256,
         num_layers: int = 6,
         num_heads: int = 8,
         ff_dim: int = 2048,
