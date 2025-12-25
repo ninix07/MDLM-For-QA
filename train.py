@@ -25,24 +25,23 @@ from models.scaler import LatentScaler
 from metrics import compute_metrics
 
 
-def get_kl_weight(epoch: int, total_epochs: int, target_kl: float = 0.1, warmup_ratio: float = 0.5) -> float:
+def get_kl_weight(current_step: int, total_steps: int, target_kl: float = 0.1, cycles: int = 4) -> float:
     """
-    Calculate KL weight using linear annealing.
+    Calculate KL weight using cyclic linear annealing.
+    """
+    if total_steps == 0:
+        return target_kl
+        
+    cycle_len = total_steps // cycles
+    current_cycle_step = current_step % cycle_len
     
-    Args:
-        epoch: Current epoch (0-indexed)
-        total_epochs: Total number of epochs for VAE warmup
-        target_kl: Final KL weight
-        warmup_ratio: Fraction of epochs over which to anneal KL
-    """
-    if total_epochs == 0:
+    # Anneal for 50% of the cycle, then hold constant
+    warmup_steps = int(cycle_len * 0.5)
+    
+    if current_cycle_step >= warmup_steps:
         return target_kl
         
-    warmup_epochs = int(total_epochs * warmup_ratio)
-    if epoch >= warmup_epochs:
-        return target_kl
-        
-    return target_kl * (epoch / max(1, warmup_epochs))
+    return target_kl * (current_cycle_step / max(1, warmup_steps))
 
 
 
@@ -112,16 +111,30 @@ def train_step(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
+    # Compute latent stats if available
+    mean_norm = 0.0
+    std_mean = 0.0
+    if train_vae_only and "mean" in outputs:
+        # outputs["mean"] is [batch, seq, dim] or [batch, dim]
+        mean_val = outputs["mean"]
+        logvar_val = outputs["logvar"]
+        std_val = torch.exp(0.5 * logvar_val)
+        
+        mean_norm = mean_val.norm(dim=-1).mean().item()
+        std_mean = std_val.mean().item()
+
     return {
         "loss": loss.item() * accumulation_steps,  # Return unscaled loss for logging
         "diff_loss": outputs["diffusion_loss"].item(),
         "vae_loss": outputs["vae_loss"].item(),
         "penalty": outputs.get("penalty", torch.tensor(0.0)).item(),
+        "mean_norm": mean_norm,
+        "std_mean": std_mean,
     }
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=50):
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=50, kl_weight=0.1):
     """
     Validation loop with F1 and EM metrics.
     
@@ -131,6 +144,8 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     """
     model.eval()
     total_loss = 0.0
+    total_recon_loss = 0.0
+    total_kl_loss = 0.0
     num_batches = 0
     
     all_predictions = []
@@ -153,8 +168,12 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             answer_ids,
             answer_mask,
             train_vae_only=train_vae_only,
+            kl_weight=kl_weight,
         )
         total_loss += outputs["loss"].item()
+        if "recon_loss" in outputs:
+            total_recon_loss += outputs["recon_loss"].item()
+            total_kl_loss += outputs["kl_loss"].item()
         num_batches += 1
         
         # 2. Generate/Reconstruct Answers (for metrics)
@@ -190,6 +209,9 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     # Compute metrics
     metrics = compute_metrics(all_predictions, all_references)
     metrics["loss"] = avg_loss
+    if total_recon_loss > 0:
+        metrics["recon_loss"] = total_recon_loss / max(num_batches, 1)
+        metrics["kl_loss"] = total_kl_loss / max(num_batches, 1)
     
     # Memory management
     if device.type == "cuda":
@@ -224,6 +246,14 @@ def load_checkpoint(model, optimizer, scheduler, path, device):
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if scheduler and checkpoint["scheduler_state_dict"]:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        
+    # Load scaler stats if available
+    if "scaler_mean" in checkpoint and checkpoint["scaler_mean"] is not None:
+        print("Loading latent scaler stats from checkpoint...")
+        model.scaler.mean = checkpoint["scaler_mean"].to(device)
+        model.scaler.std = checkpoint["scaler_std"].to(device)
+        model.scaler.to(device)
+        
     return checkpoint["epoch"], checkpoint["step"]
 
 
@@ -376,10 +406,14 @@ def main():
             
             pbar = tqdm(train_loader, desc=f"Warmup Epoch {epoch+1}/{config.training.vae_warmup_epochs}")
             
-            # Calculate KL weight for this epoch
-            current_kl = get_kl_weight(epoch, config.training.vae_warmup_epochs, target_kl=0.1)
+            # Calculate total warmup steps
+            total_warmup_steps = config.training.vae_warmup_epochs * len(train_loader)
             
             for batch_idx, batch in enumerate(pbar):
+                # Calculate KL weight for this step
+                current_step = epoch * len(train_loader) + batch_idx
+                current_kl = get_kl_weight(current_step, total_warmup_steps, target_kl=0.1, cycles=4)
+                
                 metrics = train_step(
                     model,
                     batch,
@@ -430,11 +464,15 @@ def main():
             val_vae_loss = val_metrics["loss"]
             val_f1 = val_metrics["f1"]
             val_em = val_metrics["em"]
+            val_recon = val_metrics.get("recon_loss", 0.0)
+            val_kl = val_metrics.get("kl_loss", 0.0)
             
-            print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f}, F1 = {val_f1:.2f}, EM = {val_em:.2f}")
+            print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f} (Recon={val_recon:.4f}, KL={val_kl:.4f}), F1 = {val_f1:.2f}, EM = {val_em:.2f}")
             
             wandb.log({
                 "warmup/val_vae_loss": val_vae_loss,
+                "warmup/val_recon_loss": val_recon,
+                "warmup/val_kl_loss": val_kl,
                 "warmup/val_f1": val_f1,
                 "warmup/val_em": val_em,
                 "warmup/epoch": epoch

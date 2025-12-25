@@ -314,6 +314,7 @@ class TextVAE(nn.Module):
             logits.view(-1, self.vocab_size),
             input_ids.view(-1),
             reduction="mean",
+            ignore_index=1,  # XLM-R pad token id
         )
 
         # KL divergence loss
@@ -329,6 +330,8 @@ class TextVAE(nn.Module):
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
             "z": outputs["z"],
+            "mean": mean,
+            "logvar": logvar,
         }
 
     def get_latent(
@@ -539,6 +542,7 @@ class SequenceVAE(nn.Module):
                 chunk_logits.reshape(-1, self.vocab_size),
                 chunk_targets.reshape(-1),
                 reduction="sum",
+                ignore_index=1,  # XLM-R pad token id
             )
             recon_loss = recon_loss + chunk_loss
 
@@ -556,6 +560,8 @@ class SequenceVAE(nn.Module):
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
             "z": z,
+            "mean": mean,
+            "logvar": logvar,
         }
 
     def get_latent(

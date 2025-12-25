@@ -197,12 +197,19 @@ class LatentDiffusionQA(nn.Module):
         if train_vae_only:
             vae_output = self.vae.loss(answer_ids, answer_mask, kl_weight=kl_weight)
             vae_loss = vae_output["loss"]
-            return {
+            ret = {
                 "loss": vae_loss,
                 "diffusion_loss": torch.tensor(0.0, device=answer_ids.device),
                 "vae_loss": vae_loss,
                 "penalty": torch.tensor(0.0, device=answer_ids.device),
             }
+            if "mean" in vae_output:
+                ret["mean"] = vae_output["mean"]
+                ret["logvar"] = vae_output["logvar"]
+            if "recon_loss" in vae_output:
+                ret["recon_loss"] = vae_output["recon_loss"]
+                ret["kl_loss"] = vae_output["kl_loss"]
+            return ret
 
         # Encode answer to latent
         z_0 = self.encode_answer(answer_ids, answer_mask)
