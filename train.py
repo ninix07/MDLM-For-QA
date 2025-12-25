@@ -75,8 +75,8 @@ def debug_dimensions(model, batch, device, epoch_num):
         print(f"\n[DEBUG Epoch {epoch_num}] Dimension Verification:")
         print(f"    Sample Answer: '{answer_text[:50]}...' " if len(answer_text) > 50 else f"    Sample Answer: '{answer_text}'")
         print(f"    BERT Embeddings: {embeddings.shape} (expected: [1, seq, 768])")
-        print(f"    VAE Latent (z):  {z.shape} (expected: [1, seq, 256])")
-        print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 256 else f"    ❌ ERROR: Expected 256, got {z.shape[-1]}")
+        print(f"    VAE Latent (z):  {z.shape} (expected: [1, seq, 128])")
+        print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 128 else f"    ❌ ERROR: Expected 128, got {z.shape[-1]}")
     model.train()
 
 
@@ -245,7 +245,7 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                 # Add latent dimension info for diffusion phase
                 if not train_vae_only and 'latent' in gen_outputs:
                     latent = gen_outputs['latent']
-                    print(f"Generated Latent Shape: {latent.shape} (expected: [batch, 100, 256])")
+                    print(f"Generated Latent Shape: {latent.shape} (expected: [batch, 100, 128])")
                     print(f"Latent Mean: {latent.mean().item():.4f}, Std: {latent.std().item():.4f}")
 
     avg_loss = total_loss / max(num_batches, 1)
