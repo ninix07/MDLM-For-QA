@@ -56,6 +56,31 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def debug_dimensions(model, batch, device, epoch_num):
+    """Debug function to verify VAE 768→256 transformation at epoch start."""
+    model.eval()
+    with torch.no_grad():
+        answer_ids = batch["answer_input_ids"][:1].to(device)
+        answer_mask = batch["answer_attention_mask"][:1].to(device)
+        
+        # Decode actual answer text for transparency
+        answer_text = model.tokenizer.decode(answer_ids[0], skip_special_tokens=True)
+        
+        # Get BERT embeddings
+        embeddings = model.vae.embeddings(answer_ids)
+        
+        # Get VAE latent
+        z, mean, logvar = model.vae.encode(answer_ids, answer_mask)
+        
+        print(f"\n[DEBUG Epoch {epoch_num}] Dimension Verification:")
+        print(f"    Sample Answer: '{answer_text[:50]}...' " if len(answer_text) > 50 else f"    Sample Answer: '{answer_text}'")
+        print(f"    BERT Embeddings: {embeddings.shape} (expected: [1, seq, 768])")
+        print(f"    VAE Latent (z):  {z.shape} (expected: [1, seq, 256])")
+        print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 256 else f"    ❌ ERROR: Expected 256, got {z.shape[-1]}")
+    model.train()
+
+
+
 def train_step(
     model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.1
 ):
@@ -410,6 +435,18 @@ def main():
         patience_counter = 0
         
         for epoch in range(config.training.vae_warmup_epochs):
+            # Debug dimensions at start of first epoch with random batch
+            if epoch == 0:
+                # Get a random batch (skip random number of batches)
+                import random
+                skip_count = random.randint(0, min(50, len(train_loader) - 1))
+                random_batch = None
+                for i, batch in enumerate(train_loader):
+                    if i == skip_count:
+                        random_batch = batch
+                        break
+                debug_dimensions(model, random_batch, device, epoch + 1)
+            
             model.train()
             epoch_vae_loss = 0.0
             
@@ -540,6 +577,17 @@ def main():
 
     # Training loop
     for epoch in range(start_epoch, args.epochs):
+        # Debug dimensions at start of first diffusion epoch with random batch
+        if epoch == start_epoch:
+            import random
+            skip_count = random.randint(0, min(50, len(train_loader) - 1))
+            random_batch = None
+            for i, batch in enumerate(train_loader):
+                if i == skip_count:
+                    random_batch = batch
+                    break
+            debug_dimensions(model, random_batch, device, f"Diffusion-{epoch + 1}")
+        
         model.train()
         epoch_loss = 0.0
 
