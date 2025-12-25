@@ -21,7 +21,29 @@ from config import Config, get_config
 from data import create_dataloader
 from models import LatentDiffusionQA
 from models.scaler import LatentScaler
+from models.scaler import LatentScaler
 from metrics import compute_metrics
+
+
+def get_kl_weight(epoch: int, total_epochs: int, target_kl: float = 0.1, warmup_ratio: float = 0.5) -> float:
+    """
+    Calculate KL weight using linear annealing.
+    
+    Args:
+        epoch: Current epoch (0-indexed)
+        total_epochs: Total number of epochs for VAE warmup
+        target_kl: Final KL weight
+        warmup_ratio: Fraction of epochs over which to anneal KL
+    """
+    if total_epochs == 0:
+        return target_kl
+        
+    warmup_epochs = int(total_epochs * warmup_ratio)
+    if epoch >= warmup_epochs:
+        return target_kl
+        
+    return target_kl * (epoch / max(1, warmup_epochs))
+
 
 
 def set_seed(seed: int):
@@ -36,7 +58,7 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def train_step(
-    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False
+    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.1
 ):
     """Single training step with gradient accumulation support."""
     context_ids = batch["context_input_ids"].to(device)
@@ -60,6 +82,7 @@ def train_step(
                 answer_ids,
                 answer_mask,
                 train_vae_only=train_vae_only,
+                kl_weight=kl_weight,
             )
             loss = outputs["loss"] / accumulation_steps
         grad_scaler.scale(loss).backward()
@@ -79,6 +102,7 @@ def train_step(
             answer_ids,
             answer_mask,
             train_vae_only=train_vae_only,
+            kl_weight=kl_weight,
         )
         loss = outputs["loss"] / accumulation_steps
         loss.backward()
@@ -97,8 +121,14 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False):
-    """Validation loop with F1 and EM metrics."""
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=50):
+    """
+    Validation loop with F1 and EM metrics.
+    
+    Args:
+        max_metric_batches: Number of batches to compute expensive generation metrics for.
+                            Loss is computed for all batches.
+    """
     model.eval()
     total_loss = 0.0
     num_batches = 0
@@ -128,28 +158,32 @@ def validate(model, val_loader, device, train_vae_only=False):
         num_batches += 1
         
         # 2. Generate/Reconstruct Answers (for metrics)
-        if train_vae_only:
-            gen_outputs = model.vae_reconstruct(answer_ids, answer_mask)
-        else:
-            gen_outputs = model.generate(
-                context_ids,
-                context_mask,
-                question_ids,
-                question_mask,
-                show_progress=False
-            )
-        
-        # Decode predictions
-        pred_texts = model.decode_tokens_to_text(gen_outputs["tokens"], gen_outputs["is_null"])
-        
-        # Decode ground truth
-        # Identify null answers in ground truth
-        null_token_id = model.null_ans_token_id
-        is_null_ref = (answer_ids[:, 0] == null_token_id)
-        ref_texts = model.decode_tokens_to_text(answer_ids, is_null_ref)
-        
-        all_predictions.extend(pred_texts)
-        all_references.extend(ref_texts)
+        # Only for the first N batches to save time
+        if num_batches <= max_metric_batches:
+            if train_vae_only:
+                gen_outputs = model.vae_reconstruct(answer_ids, answer_mask)
+            else:
+                # Use reduced inference steps for speed (e.g., 20)
+                gen_outputs = model.generate(
+                    context_ids,
+                    context_mask,
+                    question_ids,
+                    question_mask,
+                    show_progress=False,
+                    num_inference_steps=20
+                )
+            
+            # Decode predictions
+            pred_texts = model.decode_tokens_to_text(gen_outputs["tokens"], gen_outputs["is_null"])
+            
+            # Decode ground truth
+            # Identify null answers in ground truth
+            null_token_id = model.null_ans_token_id
+            is_null_ref = (answer_ids[:, 0] == null_token_id)
+            ref_texts = model.decode_tokens_to_text(answer_ids, is_null_ref)
+            
+            all_predictions.extend(pred_texts)
+            all_references.extend(ref_texts)
 
     avg_loss = total_loss / max(num_batches, 1)
     
@@ -341,6 +375,10 @@ def main():
             epoch_vae_loss = 0.0
             
             pbar = tqdm(train_loader, desc=f"Warmup Epoch {epoch+1}/{config.training.vae_warmup_epochs}")
+            
+            # Calculate KL weight for this epoch
+            current_kl = get_kl_weight(epoch, config.training.vae_warmup_epochs, target_kl=0.1)
+            
             for batch_idx, batch in enumerate(pbar):
                 metrics = train_step(
                     model,
@@ -352,6 +390,7 @@ def main():
                     accumulation_steps=accumulation_steps,
                     step_idx=batch_idx,
                     train_vae_only=True,
+                    kl_weight=current_kl,
                 )
                 
                 # Only step scheduler after full accumulation
@@ -363,6 +402,8 @@ def main():
                 pbar.set_postfix(
                     {
                         "vae_loss": f"{metrics['vae_loss']:.4f}",
+                        "vae_loss": f"{metrics['vae_loss']:.4f}",
+                        "kl_w": f"{current_kl:.4f}",
                         "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                     }
                 )
@@ -375,6 +416,7 @@ def main():
                 wandb.log(
                     {
                         "warmup/vae_loss": metrics["vae_loss"],
+                        "warmup/kl_weight": current_kl,
                         "warmup/lr": scheduler.get_last_lr()[0],
                         "warmup/epoch": epoch,
                         "warmup/step": batch_idx + epoch * len(train_loader),
@@ -384,7 +426,7 @@ def main():
             avg_vae_loss = epoch_vae_loss / len(train_loader)
             
             # Validate VAE
-            val_metrics = validate(model, val_loader, device, train_vae_only=True)
+            val_metrics = validate(model, val_loader, device, train_vae_only=True, max_metric_batches=50)
             val_vae_loss = val_metrics["loss"]
             val_f1 = val_metrics["f1"]
             val_em = val_metrics["em"]
@@ -507,7 +549,7 @@ def main():
                 )
 
         avg_train_loss = epoch_loss / len(train_loader)
-        val_metrics = validate(model, val_loader, device)
+        val_metrics = validate(model, val_loader, device, max_metric_batches=50)
         val_loss = val_metrics["loss"]
         val_f1 = val_metrics["f1"]
         val_em = val_metrics["em"]

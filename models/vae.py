@@ -467,7 +467,7 @@ class SequenceVAE(nn.Module):
         # Requirement 1: VAE Robustness & Local Isometry
         # Inject additional noise during training to bridge gap with diffusion
         if self.training:
-            noise_injection = torch.randn_like(z) * 0.05
+            noise_injection = torch.randn_like(z) * 0.1
             z = z + noise_injection
 
         return z, mean, logvar
