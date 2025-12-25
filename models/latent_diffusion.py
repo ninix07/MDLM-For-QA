@@ -592,6 +592,9 @@ class LatentDiffusionQA(nn.Module):
     ) -> list:
         """Convert token IDs to text strings."""
         texts = []
+        sep_id = self.tokenizer.sep_token_id 
+        pad_id = self.tokenizer.pad_token_id 
+        stop_tokens = {sep_id, pad_id}  
         for i in range(tokens.shape[0]):
             if is_null[i]:
                 texts.append("")
