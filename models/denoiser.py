@@ -6,7 +6,7 @@ Predicts noise given noisy latent z_t, timestep t, and condition (Q + C).
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
-from transformers import XLMRobertaModel
+from transformers import AutoModel
 
 from .embeddings import SinusoidalTimestepEmbedding, TimestepMLP
 from .transformer_blocks import ConditionalTransformerBlock
@@ -31,7 +31,8 @@ class ConditionalDenoiser(nn.Module):
         self.latent_dim = latent_dim
         self.d_model = d_model
 
-        self.condition_encoder = XLMRobertaModel.from_pretrained(condition_encoder)
+        # Use AutoModel for flexibility with different encoders (BERT, XLM-R, etc.)
+        self.condition_encoder = AutoModel.from_pretrained(condition_encoder)
         if freeze_condition_encoder:
             for param in self.condition_encoder.parameters():
                 param.requires_grad = False

@@ -242,6 +242,11 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                 print(f"Ref Text: '{ref_texts[sample_idx]}'")
                 print(f"Is Null Ref: {is_null_ref[sample_idx]}")
                 print(f"Is Null Pred: {gen_outputs['is_null'][sample_idx]}")
+                # Add latent dimension info for diffusion phase
+                if not train_vae_only and 'latent' in gen_outputs:
+                    latent = gen_outputs['latent']
+                    print(f"Generated Latent Shape: {latent.shape} (expected: [batch, 100, 256])")
+                    print(f"Latent Mean: {latent.mean().item():.4f}, Std: {latent.std().item():.4f}")
 
     avg_loss = total_loss / max(num_batches, 1)
     
