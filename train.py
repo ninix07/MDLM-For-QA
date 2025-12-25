@@ -208,13 +208,14 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                 gen_outputs = model.vae_reconstruct(answer_ids, answer_mask)
             else:
                 # Use reduced inference steps for speed (e.g., 20)
+                
                 gen_outputs = model.generate(
                     context_ids,
                     context_mask,
                     question_ids,
                     question_mask,
                     show_progress=False,
-                    num_inference_steps=config.training.num_inference_steps
+                    num_inference_steps=50
                 )
             
             # Decode predictions
