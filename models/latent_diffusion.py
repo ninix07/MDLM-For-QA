@@ -596,12 +596,29 @@ class LatentDiffusionQA(nn.Module):
             if is_null[i]:
                 texts.append("")
             else:
+                # Convert the row of token IDs to a standard Python list
                 token_ids = tokens[i].tolist()
-                # Remove padding and special tokens
+            
+            # 2. THE EOS TRICK: Find the first occurrence of a Stop Token
+            # This acts as a 'Wall' that stops the decoder from reading gibberish.
+                stop_idx = len(token_ids)
+                for idx, tid in enumerate(token_ids):
+                    if tid in stop_tokens:
+                        stop_idx = idx
+                        break
+            
+            # 3. Slice the list to remove everything after (and including) the stop token
+                valid_ids = token_ids[:stop_idx]
+            
+            # 4. Decode only the valid tokens into a clean string
+            # skip_special_tokens=True is used as a safety layer for CLS or other markers.
                 text = self.tokenizer.decode(
-                    token_ids,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=True,
+                    valid_ids, 
+                    skip_special_tokens=True, 
+                    clean_up_tokenization_spaces=True
                 )
+            
+            # Final cleanup of leading/trailing whitespace
                 texts.append(text.strip())
+            
         return texts
