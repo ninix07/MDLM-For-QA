@@ -333,8 +333,8 @@ if self.false_negative_penalty_weight > 0 and is_answerable.any():
         # I'll add a placeholder for the penalty that uses a separate forward pass 
         # on a *subset* of answerable samples to keep it cheap.
         
-        penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
-        if self.false_negative_penalty_weight > 0 and is_answerable.any():
+    penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
+    if self.false_negative_penalty_weight > 0 and is_answerable.any():
              # Sample a few answerable examples
              subset_indices = torch.where(is_answerable)[0]
              if len(subset_indices) > 4:
@@ -410,12 +410,12 @@ if self.false_negative_penalty_weight > 0 and is_answerable.any():
              
              penalty_loss = self.false_negative_penalty_weight * penalty
 
-        if self.use_vae:
-            total_loss = diffusion_loss + 0.1 * vae_loss + penalty_loss
-        else:
-            total_loss = diffusion_loss + penalty_loss
+    if self.use_vae:
+        total_loss = diffusion_loss + 0.1 * vae_loss + penalty_loss
+    else:
+        total_loss = diffusion_loss + penalty_loss
 
-        return {
+    return {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
             "vae_loss": vae_loss,
