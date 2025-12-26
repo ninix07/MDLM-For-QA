@@ -224,7 +224,7 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             # Decode ground truth
             # Identify null answers in ground truth
             null_token_id = model.null_ans_token_id
-            is_null_ref = (answer_ids[:, 0] == null_token_id)
+            is_null_ref = (answer_ids[:, 1] == null_token_id)
             ref_texts = model.decode_tokens_to_text(answer_ids, is_null_ref)
             
             all_predictions.extend(pred_texts)
