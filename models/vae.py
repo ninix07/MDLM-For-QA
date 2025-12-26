@@ -209,6 +209,9 @@ class TextVAE(nn.Module):
         # Get latent distribution parameters
         mean = self.to_latent_mean(pooled)
         logvar = self.to_latent_logvar(pooled)
+        
+        # Clamp logvar to prevent instability
+        logvar = torch.clamp(logvar, -30, 20)
 
         # Reparameterization trick
         std = torch.exp(0.5 * logvar)
@@ -463,6 +466,9 @@ class SequenceVAE(nn.Module):
         # Get latent distribution (per position)
         mean = self.to_mean(encoded)
         logvar = self.to_logvar(encoded)
+        
+        # Clamp logvar to prevent instability
+        logvar = torch.clamp(logvar, -30, 20)
 
         # Reparameterization
         std = torch.exp(0.5 * logvar)
