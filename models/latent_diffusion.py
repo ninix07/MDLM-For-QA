@@ -187,6 +187,7 @@ class LatentDiffusionQA(nn.Module):
         answer_mask: torch.Tensor,
         train_vae_only: bool = False,
         kl_weight: float = 0.1,
+        cond_dropout_prob: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
         """
         Training forward pass.
@@ -221,6 +222,25 @@ class LatentDiffusionQA(nn.Module):
         # Normalize latent if scaler is provided
         if self.scaler is not None:
             z_0 = self.scaler.transform(z_0, mask=answer_mask)
+
+        # IMPLEMENT CONDITIONING DROPOUT
+        # This is required for CFG to work at inference
+        if self.training and cond_dropout_prob > 0:
+            # Create a mask: 1 for dropout (null), 0 for keep
+            drop_mask = torch.bernoulli(torch.full((context_ids.shape[0],), cond_dropout_prob, device=context_ids.device)).bool()
+            
+            # Clone to avoid modifying original batch for other logging
+            context_ids = context_ids.clone()
+            question_ids = question_ids.clone()
+            context_mask = context_mask.clone()
+            question_mask = question_mask.clone()
+            
+            # Replace with PAD tokens to represent "No Context"
+            context_ids[drop_mask] = self.pad_token_id
+            question_ids[drop_mask] = self.pad_token_id
+            # Set masks to 0 for these entries
+            context_mask[drop_mask] = 0
+            question_mask[drop_mask] = 0
 
         # Diffusion training loss
         condition_kwargs = {
@@ -514,9 +534,10 @@ class LatentDiffusionQA(nn.Module):
         context_mask: torch.Tensor,
         question_ids: torch.Tensor,
         question_mask: torch.Tensor,
-        null_threshold: float = 0.7,
+        null_threshold: float = 0.3,
         show_progress: bool = False,
         num_inference_steps: Optional[int] = None,
+        guidance_scale: float = 5.0,
     ) -> Dict[str, torch.Tensor]:
         """
         Generate answer for given context and question.
@@ -539,6 +560,12 @@ class LatentDiffusionQA(nn.Module):
             self.sampler.num_inference_steps = num_inference_steps
             
         try:
+            # PREPARE NULL CONDITIONING FOR PASS 2
+            uncond_context_ids = torch.full_like(context_ids, self.pad_token_id)
+            uncond_context_mask = torch.zeros_like(context_mask)
+            uncond_question_ids = torch.full_like(question_ids, self.pad_token_id)
+            uncond_question_mask = torch.zeros_like(question_mask)
+
             z_0 = self.sampler.sample(
                 self.denoiser,
                 shape,
@@ -548,6 +575,11 @@ class LatentDiffusionQA(nn.Module):
                 question_mask,
                 device,
                 show_progress=show_progress,
+                uncond_context_ids=uncond_context_ids,
+                uncond_context_mask=uncond_context_mask,
+                uncond_question_ids=uncond_question_ids,
+                uncond_question_mask=uncond_question_mask,
+                guidance_scale=guidance_scale,
             )
         finally:
             # Restore original steps

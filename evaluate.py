@@ -167,7 +167,7 @@ def evaluate_model(
     data_loader,
     dataset,
     device: torch.device,
-    null_threshold: float = 0.7,
+    null_threshold: float = 0.3,
 ) -> Tuple[Dict[str, str], Dict[str, float]]:
     """Run model on dataset and collect predictions."""
     model.eval()
@@ -209,7 +209,7 @@ def main():
     parser.add_argument("--data_file", type=str, default="data/dev-v2.0.json")
     parser.add_argument("--output_file", type=str, default="predictions.json")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--null_threshold", type=float, default=0.7)
+    parser.add_argument("--null_threshold", type=float, default=0.3)
     args = parser.parse_args()
 
     # Handle WandB checkpoint

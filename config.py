@@ -117,7 +117,7 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    guidance_scale: float = 1.0
+    guidance_scale: float = 5.0
 
     # Null answer threshold
     null_ans_threshold: float = 0.6# Cosine similarity threshold

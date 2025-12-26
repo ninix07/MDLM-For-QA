@@ -179,14 +179,30 @@ class CachedDDIMSampler:
         device: torch.device,
         show_progress: bool = True,
         clip_sample: bool = True,
+        uncond_context_ids: Optional[torch.Tensor] = None,
+        uncond_context_mask: Optional[torch.Tensor] = None,
+        uncond_question_ids: Optional[torch.Tensor] = None,
+        uncond_question_mask: Optional[torch.Tensor] = None,
+        guidance_scale: float = 5.0,
     ) -> torch.Tensor:
         """Sample with cached condition for faster inference."""
         batch_size = shape[0]
         z_t = torch.randn(shape, device=device)
 
+        # Encode condition
         condition, condition_mask = model.encode_condition(
             context_ids, context_mask, question_ids, question_mask
         )
+
+        # CFG Prep: Encode unconditional if needed
+        is_cfg = guidance_scale != 1.0 and uncond_context_ids is not None
+        if is_cfg:
+            uncond_condition, uncond_condition_mask = model.encode_condition(
+                uncond_context_ids, uncond_context_mask, uncond_question_ids, uncond_question_mask
+            )
+            # Concatenate for batch processing [2*B, seq, dim]
+            condition = torch.cat([condition, uncond_condition])
+            condition_mask = torch.cat([condition_mask, uncond_condition_mask])
 
         timesteps = self.timesteps
         if show_progress:
@@ -195,9 +211,22 @@ class CachedDDIMSampler:
         for i, t in enumerate(timesteps):
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
 
-            noise_pred = model.forward_with_cached_condition(
-                z_t, t_batch, condition, condition_mask
-            )
+            if is_cfg:
+                # Expand z and t for dual-pass [2*B, ...]
+                z_in = torch.cat([z_t, z_t])
+                t_in = torch.cat([t_batch, t_batch])
+                
+                noise_pred_all = model.forward_with_cached_condition(
+                    z_in, t_in, condition, condition_mask
+                )
+                
+                # Split and apply CFG formula
+                noise_cond, noise_uncond = noise_pred_all.chunk(2)
+                noise_pred = noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+            else:
+                noise_pred = model.forward_with_cached_condition(
+                    z_t, t_batch, condition, condition_mask
+                )
 
             alpha_bar = self.scheduler.alphas_cumprod[t]
 

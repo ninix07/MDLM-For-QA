@@ -110,7 +110,7 @@ python train.py \
 python evaluate.py \
     --checkpoint checkpoints/best_model.pt \
     --data_file data/dev-v2.0.json \
-    --null_threshold 0.7
+    --null_threshold 0.3
 ```
 
 Outputs:

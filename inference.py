@@ -17,7 +17,7 @@ class QAInference:
         self,
         checkpoint_path: str,
         device: str = None,
-        null_threshold: float = 0.7,
+        null_threshold: float = 0.3,
     ):
         self.config = get_config()
         self.device = torch.device(
@@ -148,7 +148,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--context", type=str, default=None)
     parser.add_argument("--question", type=str, default=None)
-    parser.add_argument("--null_threshold", type=float, default=0.7)
+    parser.add_argument("--null_threshold", type=float, default=0.3)
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
 
