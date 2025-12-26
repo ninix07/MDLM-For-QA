@@ -295,46 +295,7 @@ class LatentDiffusionQA(nn.Module):
         
         penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
         
-       # --- STABILIZED PENALTY LOGIC ---
-if self.false_negative_penalty_weight > 0 and is_answerable.any():
-    # ... (subset selection and z_t sampling remain the same) ...
-    
-    # Predict noise
-    noise_pred = self.denoiser(
-        z_t, t, cond_ids_ans, cond_mask_ans, q_ids_ans, q_mask_ans, z_mask=mask_ans
-    )
-    
-    alpha_cumprod = self.scheduler.alphas_cumprod.to(z_0.device)[t]
-    sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod).view(-1, 1, 1)
-    sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod).view(-1, 1, 1)
-    
-    # STABILITY FIX 1: Clamp denominator to prevent division by zero at high t
-    # Using 1e-3 provides a safe floor for the inversion
-    pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod.clamp(min=1e-3)
-    
-    pred_mean = pred_x0.mean(dim=1) 
-    null_mean = null_emb.mean(dim=0) 
-    
-    # STABILITY FIX 2: Safe Euclidean distance (prevents infinite gradients at dist=0)
-    # dist = sqrt(sum(diff^2) + eps)
-    dist_sq = torch.sum((pred_mean - null_mean)**2, dim=-1)
-    dist = torch.sqrt(dist_sq + 1e-8) 
-    
-    # Penalty: High similarity to NULL for an answerable question = high penalty
-    penalty = torch.exp(-dist).mean()
-    penalty_loss = self.false_negative_penalty_weight * penalty
-
-        
-        # Try to get pred_x0 from diff_output if available, otherwise skip penalty for now 
-        # (or implement a separate forward pass if I really need to).
-        # I'll assume for now I can't get it and will rely on the user's "False Negative Penalty" request
-        # which implies I should try to add it.
-        
-        # I'll add a placeholder for the penalty that uses a separate forward pass 
-        # on a *subset* of answerable samples to keep it cheap.
-        
-    penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
-    if self.false_negative_penalty_weight > 0 and is_answerable.any():
+        if self.false_negative_penalty_weight > 0 and is_answerable.any():
              # Sample a few answerable examples
              subset_indices = torch.where(is_answerable)[0]
              if len(subset_indices) > 4:
@@ -383,7 +344,7 @@ if self.false_negative_penalty_weight > 0 and is_answerable.any():
              sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod).view(-1, 1, 1)
              sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod).view(-1, 1, 1)
              
-             pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod
+             pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod.clamp(min=1e-3)
              
              # Calculate distance to null
              # null_emb: [dim] or [seq, dim]?
@@ -402,7 +363,8 @@ if self.false_negative_penalty_weight > 0 and is_answerable.any():
              pred_mean = pred_x0.mean(dim=1) # [batch, dim]
              null_mean = null_emb.mean(dim=0) # [dim]
              
-             dist = torch.norm(pred_mean - null_mean, p=2, dim=-1) # [batch]
+             dist_sq = torch.sum((pred_mean - null_mean)**2, dim=-1)
+             dist = torch.sqrt(dist_sq + 1e-8) 
              
              # We want to MAXIMIZE distance (minimize -distance or exp(-distance))
              # Penalty = exp(-distance)
@@ -410,12 +372,12 @@ if self.false_negative_penalty_weight > 0 and is_answerable.any():
              
              penalty_loss = self.false_negative_penalty_weight * penalty
 
-    if self.use_vae:
-        total_loss = diffusion_loss + 0.1 * vae_loss + penalty_loss
-    else:
-        total_loss = diffusion_loss + penalty_loss
+        if self.use_vae:
+            total_loss = diffusion_loss + 0.1 * vae_loss + penalty_loss
+        else:
+            total_loss = diffusion_loss + penalty_loss
 
-    return {
+        return {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
             "vae_loss": vae_loss,
