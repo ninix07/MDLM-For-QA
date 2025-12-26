@@ -170,7 +170,7 @@ class LatentDiffusionQA(nn.Module):
         tokens = self.decode_latent(z, return_tokens=True)
         
         # Identify null answers (first token is null_ans_token_id)
-        is_null = (tokens[:, 0] == self.null_ans_token_id)
+        is_null = (tokens[:, 1] == self.null_ans_token_id)
         
         return {
             "tokens": tokens,
