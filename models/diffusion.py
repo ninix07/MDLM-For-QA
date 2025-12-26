@@ -215,10 +215,11 @@ class GaussianDiffusion(nn.Module):
         gamma = 5.0
         # Clamp 1 - alpha_bar_t to avoid division by zero
         snr = alpha_bar_t / (1 - alpha_bar_t).clamp(min=1e-8)
-        # Stable weighting: weight = min(snr, gamma) / snr
-        # For epsilon prediction, the weight effectively clips the importance of low-SNR timesteps
-        # Clamp snr in denominator to avoid division by zero
-        mse_weight = torch.stack([snr, torch.full_like(snr, gamma)], dim=0).min(dim=0)[0] / snr.clamp(min=1e-8)
+        
+        # Stable weighting: weight = min(1, gamma / snr)
+        # If snr is small (t -> T), gamma/snr is large -> weight = 1
+        # If snr is large (t -> 0), gamma/snr is small -> weight = gamma/snr
+        mse_weight = torch.minimum(torch.ones_like(snr), gamma / snr)
 
         # Expand for element-wise multiplication: [batch, 1, 1]
         mse_weight = mse_weight.view(-1, 1, 1)

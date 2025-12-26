@@ -22,11 +22,12 @@ def test_cfg_fix():
     time_emb = torch.randn(batch_size, d_model)
     
     # Case: Dropped Sample (CFG)
-    # The fix sets mask to 1 (Valid) even for dropped samples (which are PAD tokens)
+    # The fix sets mask to 0 everywhere EXCEPT the first token (dummy)
     
     # mask: 1 = valid, 0 = padding
-    # With fix: mask is ALL ONES for the dropped sample
-    mask_dropped_fixed = torch.ones(cond_len)
+    # With refined fix: mask is 1 only at index 0
+    mask_dropped_fixed = torch.zeros(cond_len)
+    mask_dropped_fixed[0] = 1
     
     condition_mask = torch.stack([mask_dropped_fixed, mask_dropped_fixed]) # [2, 5]
     

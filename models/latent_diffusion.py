@@ -239,21 +239,19 @@ class LatentDiffusionQA(nn.Module):
             context_ids[drop_mask] = self.pad_token_id
             question_ids[drop_mask] = self.pad_token_id
             
-            # CRITICAL FIX: Do NOT set masks to 0. 
-            # If mask is 0, Cross-Attention ignores all keys and produces NaN.
-            # We want the model to attend to the PAD tokens (which represent "empty condition").
-            # So we keep the mask as 1 (valid) for these positions.
-            # However, we should probably only keep the FIRST token as valid to avoid attending to long sequence of PADs?
-            # Or just let it attend to all PADs. Attending to all PADs is fine, as long as they are not masked out.
-            # But wait, `context_mask` was likely 1 for valid tokens.
-            # If we overwrite ids with PAD, we should ensure mask is 1.
-            # But `context_mask` might have been 0 for original padding.
-            # We should set `context_mask` to 1 for the dropped samples, at least for the first token?
-            # Simpler: Set mask to 1 for ALL tokens in the dropped samples.
-            # This ensures there are valid keys. The keys are just PAD embeddings.
+            # CRITICAL FIX: Refined Dropout
+            # Instead of masking all tokens (which creates a strong "Null" signal),
+            # we mask everything EXCEPT the first token.
+            # The first token becomes a "dummy" valid token (PAD embedding).
+            # This prevents the model from attending to a long sequence of identical PADs.
             
-            context_mask[drop_mask] = 1
-            question_mask[drop_mask] = 1
+            # 1. Set mask to 0 everywhere for dropped samples
+            context_mask[drop_mask] = 0
+            question_mask[drop_mask] = 0
+            
+            # 2. Set mask to 1 only for the first token
+            context_mask[drop_mask, 0] = 1
+            question_mask[drop_mask, 0] = 1
 
         # Diffusion training loss
         condition_kwargs = {
@@ -380,8 +378,10 @@ class LatentDiffusionQA(nn.Module):
              dist = torch.sqrt(dist_sq + 1e-8) 
              
              # We want to MAXIMIZE distance (minimize -distance or exp(-distance))
-             # Penalty = exp(-distance)
-             penalty = torch.exp(-dist).mean()
+             # Penalty = ReLU(margin - distance)
+             # Only penalize if distance is smaller than margin
+             margin = 2.0
+             penalty = F.relu(margin - dist).mean()
              
              penalty_loss = self.false_negative_penalty_weight * penalty
 
@@ -432,9 +432,13 @@ class LatentDiffusionQA(nn.Module):
         try:
             # PREPARE NULL CONDITIONING FOR PASS 2
             uncond_context_ids = torch.full_like(context_ids, self.pad_token_id)
+            # Match training logic: Mask all except first token
             uncond_context_mask = torch.zeros_like(context_mask)
+            uncond_context_mask[:, 0] = 1
+            
             uncond_question_ids = torch.full_like(question_ids, self.pad_token_id)
             uncond_question_mask = torch.zeros_like(question_mask)
+            uncond_question_mask[:, 0] = 1
 
             z_0 = self.sampler.sample(
                 self.denoiser,
