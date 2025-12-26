@@ -238,9 +238,22 @@ class LatentDiffusionQA(nn.Module):
             # Replace with PAD tokens to represent "No Context"
             context_ids[drop_mask] = self.pad_token_id
             question_ids[drop_mask] = self.pad_token_id
-            # Set masks to 0 for these entries
-            context_mask[drop_mask] = 0
-            question_mask[drop_mask] = 0
+            
+            # CRITICAL FIX: Do NOT set masks to 0. 
+            # If mask is 0, Cross-Attention ignores all keys and produces NaN.
+            # We want the model to attend to the PAD tokens (which represent "empty condition").
+            # So we keep the mask as 1 (valid) for these positions.
+            # However, we should probably only keep the FIRST token as valid to avoid attending to long sequence of PADs?
+            # Or just let it attend to all PADs. Attending to all PADs is fine, as long as they are not masked out.
+            # But wait, `context_mask` was likely 1 for valid tokens.
+            # If we overwrite ids with PAD, we should ensure mask is 1.
+            # But `context_mask` might have been 0 for original padding.
+            # We should set `context_mask` to 1 for the dropped samples, at least for the first token?
+            # Simpler: Set mask to 1 for ALL tokens in the dropped samples.
+            # This ensures there are valid keys. The keys are just PAD embeddings.
+            
+            context_mask[drop_mask] = 1
+            question_mask[drop_mask] = 1
 
         # Diffusion training loss
         condition_kwargs = {
