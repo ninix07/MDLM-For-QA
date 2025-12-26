@@ -390,15 +390,6 @@ class LatentDiffusionQA(nn.Module):
         else:
             total_loss = diffusion_loss + penalty_loss
         
-        if self.training:
-            print(f"--- Batch Health Check ---")
-            print(f"z_0 NaN: {torch.isnan(z_0).any().item()}")
-            print(f"Diffusion Loss NaN: {torch.isnan(diffusion_loss).any().item()}")
-            print(f"Penalty Loss NaN: {torch.isnan(penalty_loss).any().item()}")
-            
-            if torch.isnan(diffusion_loss):
-                print(f"Denoiser Output Max: {self.denoiser.last_output.max().item() if hasattr(self.denoiser, 'last_output') else 'N/A'}")
-        
         return {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
