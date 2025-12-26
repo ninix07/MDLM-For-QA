@@ -344,7 +344,7 @@ class LatentDiffusionQA(nn.Module):
              sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod).view(-1, 1, 1)
              sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod).view(-1, 1, 1)
              
-             pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod.clamp(min=1e-3)
+             pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod.clamp(min=1e-8)
              
              # Calculate distance to null
              # null_emb: [dim] or [seq, dim]?
@@ -377,14 +377,14 @@ class LatentDiffusionQA(nn.Module):
         else:
             total_loss = diffusion_loss + penalty_loss
         
-        if self.training:
-            print(f"--- Batch Health Check ---")
-            print(f"z_0 NaN: {torch.isnan(z_0).any().item()}")
-            print(f"Diffusion Loss NaN: {torch.isnan(diffusion_loss).any().item()}")
-            print(f"Penalty Loss NaN: {torch.isnan(penalty_loss).any().item()}")
+        # if self.training:
+        #     print(f"--- Batch Health Check ---")
+        #     print(f"z_0 NaN: {torch.isnan(z_0).any().item()}")
+        #     print(f"Diffusion Loss NaN: {torch.isnan(diffusion_loss).any().item()}")
+        #     print(f"Penalty Loss NaN: {torch.isnan(penalty_loss).any().item()}")
             
-            if torch.isnan(diffusion_loss):
-                print(f"Denoiser Output Max: {self.denoiser.last_output.max().item() if hasattr(self.denoiser, 'last_output') else 'N/A'}")
+        #     if torch.isnan(diffusion_loss):
+        #         print(f"Denoiser Output Max: {self.denoiser.last_output.max().item() if hasattr(self.denoiser, 'last_output') else 'N/A'}")
         
         return {
             "loss": total_loss,
