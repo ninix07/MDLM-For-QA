@@ -17,8 +17,8 @@ class ModelConfig:
     latent_dim: int = 256  # VAE latent dimension (smaller than embedding_dim)
 
     # Denoiser Transformer config
-    denoiser_layers: int = 8  # Increased to 8 for deeper reasoning
-    denoiser_heads: int = 8
+    denoiser_layers: int = 12  # Increased to 12 for deep cross-attention on 512-token contexts
+    denoiser_heads: int = 12  # At least 12 heads for complex inference over 512 tokens
     denoiser_dim: int = 768  # Increased to 768 to eliminate bottleneck
     denoiser_ff_dim: int = 1024  # Reduced from 2048 for memory
     dropout: float = 0.1
@@ -57,7 +57,7 @@ class DiffusionConfig:
     cosine_s: float = 0.008  # Small offset to prevent singularity
 
     # Prediction type: 'epsilon' (noise) or 'v' (velocity)
-    prediction_type: str = "epsilon"
+    prediction_type: str = "v"
 
     # Clipping
     clip_sample: bool = True
@@ -73,9 +73,9 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 8  # Effective batch size = 32
 
     # Learning rate
-    learning_rate: float = 2e-5
-    weight_decay: float = 0.01
-    warmup_steps: int = 1000
+    learning_rate: float = 1e-5  # Smaller LR for large model convergence
+    weight_decay: float = 0.1
+    warmup_steps: int = 2000
     max_grad_norm: float = 1.0
 
     # Training duration
@@ -91,14 +91,14 @@ class TrainingConfig:
     use_amp: bool = True
 
     # Balanced batching for SQuAD 2.0
-    answerable_ratio: float = 0.65 # 65% answerable, 35% unanswerable
+    answerable_ratio: float = 0.75  # 75% answerable - bias heavily toward finding answers
 
     # Auxiliary loss to keep latents close to valid embeddings
     use_embedding_loss: bool = True
     embedding_loss_weight: float = 0.1
 
     # False negative penalty (penalize predicting no answer when answerable)
-    false_negative_penalty_weight: float = 3.0
+    false_negative_penalty_weight: float = 5.0
 
     # Checkpointing
     output_dir: str = "./checkpoints"
@@ -117,10 +117,10 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    guidance_scale: float = 7.5
+    guidance_scale: float = 3.0  # Aggressive push away from Null state
 
     # Null answer threshold
-    null_ans_threshold: float = 0.6# Cosine similarity threshold
+    null_ans_threshold: float = 0.5  # Require higher certainty before abstaining
 
     # Temperature for sampling
     temperature: float = 1.0

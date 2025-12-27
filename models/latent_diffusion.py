@@ -110,6 +110,7 @@ class LatentDiffusionQA(nn.Module):
         self.sampler = CachedDDIMSampler(
             self.scheduler,
             num_inference_steps=num_inference_timesteps,
+            prediction_type=prediction_type,
         )
 
         # Cache null answer embedding for threshold comparison
@@ -332,22 +333,34 @@ class LatentDiffusionQA(nn.Module):
              if self.scaler is not None:
                  null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
              
-             # Calculate distance
-             pred_mean = pred_x0.mean(dim=1)
-             null_mean = null_emb.mean(dim=0)
+             # FIX: Use Cosine Similarity instead of Euclidean distance
+             # Euclidean distance in 768-D space can be huge, causing hinge loss to be 0
+             # Cosine similarity is bounded [-1, 1] and numerically stable
+             pred_mean = pred_x0.mean(dim=1)  # [batch, dim]
+             null_mean = null_emb.mean(dim=0)  # [dim]
              
-             dist = torch.norm(pred_mean - null_mean, p=2, dim=-1)
+             # Normalize for cosine similarity
+             pred_norm = F.normalize(pred_mean, p=2, dim=-1)
+             null_norm = F.normalize(null_mean.unsqueeze(0), p=2, dim=-1)
              
-             # Hinge loss: penalize if distance < margin
-             margin = 2.0
-             penalty = F.relu(margin - dist).mean()
+             # Cosine similarity: high value means prediction is close to null
+             cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
+             
+             # Penalty: we want to push AWAY from null for answerable questions
+             # When cos_sim is high (close to null), penalty should be high
+             # Using (1 + cos_sim) / 2 to map from [-1,1] to [0,1]
+             # Then square it to emphasize high similarity cases
+             null_proximity = ((1 + cos_sim) / 2) ** 2
+             penalty = null_proximity.mean()
              
              penalty_loss = self.false_negative_penalty_weight * penalty
 
+        # Scale penalty_loss by 5.0 to break the Null attractor
+        # Making false negatives the most expensive mistake
         if self.use_vae:
-            total_loss = diffusion_loss + 0.1 * vae_loss + penalty_loss
+            total_loss = diffusion_loss + (vae_loss * 0.1) + (penalty_loss * 5.0)
         else:
-            total_loss = diffusion_loss + penalty_loss
+            total_loss = diffusion_loss + (penalty_loss * 5.0)
         
         return {
             "loss": total_loss,

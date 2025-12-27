@@ -194,43 +194,51 @@ class GaussianDiffusion(nn.Module):
         t = torch.randint(0, self.num_timesteps, (batch_size,), device=device)
         z_t, noise = self.q_sample(x_0, t)
 
-        noise_pred = model(z_t, t, **condition_kwargs)
+        model_output = model(z_t, t, **condition_kwargs)
+
+        # Determine target based on prediction type
+        if self.prediction_type == "epsilon":
+            target = noise
+        elif self.prediction_type == "v":
+            # v = sqrt(alpha_bar) * noise - sqrt(1 - alpha_bar) * x_0
+            sqrt_alpha = self.scheduler._extract(
+                self.scheduler.sqrt_alphas_cumprod, t, x_0.shape
+            )
+            sqrt_one_minus_alpha = self.scheduler._extract(
+                self.scheduler.sqrt_one_minus_alphas_cumprod, t, x_0.shape
+            )
+            target = sqrt_alpha * noise - sqrt_one_minus_alpha * x_0
+        else:
+            raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
         # Requirement 5: Min-SNR Weighted MSE Loss
         # SNR(t) = alpha_bar_t / (1 - alpha_bar_t)
         alphas_cumprod = self.scheduler.alphas_cumprod.to(device)
         alpha_bar_t = alphas_cumprod[t]
-        snr = alpha_bar_t / (1 - alpha_bar_t)
         
-        # Weighting: min(SNR, gamma) / SNR
-        # Standard formulation for epsilon prediction is usually just min(SNR, gamma) if loss is on epsilon?
-        # Wait, for epsilon prediction, the standard simple loss is just MSE(eps, eps_pred).
-        # Min-SNR weighting strategy (Hang et al. 2023) suggests weighting the loss term.
-        # For epsilon prediction, L_simple corresponds to SNR weighting of 1.
-        # Min-SNR strategy: weight = min(SNR, gamma) / SNR.
-        # Since we are predicting epsilon, the "natural" weight is 1.
-        # If we want to prioritize critical timesteps, we use the Min-SNR weight.
-        
-        # Min-SNR weighting strategy
+        # Min-SNR weighting strategy (Hang et al. 2023)
         gamma = 5.0
-        # Clamp 1 - alpha_bar_t to avoid division by zero
         snr = alpha_bar_t / (1 - alpha_bar_t).clamp(min=1e-8)
         
-        # Stable weighting: weight = min(1, gamma / snr)
-        # If snr is small (t -> T), gamma/snr is large -> weight = 1
-        # If snr is large (t -> 0), gamma/snr is small -> weight = gamma/snr
-        mse_weight = torch.minimum(torch.ones_like(snr), gamma / snr)
+        if self.prediction_type == "epsilon":
+            mse_weight = torch.minimum(torch.ones_like(snr), gamma / snr)
+        elif self.prediction_type == "v":
+            # For v-prediction, the natural weight is SNR / (SNR + 1)
+            # Min-SNR weighting for v-prediction: min(SNR, gamma) / (SNR + 1)
+            mse_weight = torch.minimum(snr, torch.full_like(snr, gamma)) / (snr + 1)
+        else:
+            mse_weight = torch.ones_like(snr)
 
         # Expand for element-wise multiplication: [batch, 1, 1]
         mse_weight = mse_weight.view(-1, 1, 1)
         
         if mask is not None:
             mask = mask.unsqueeze(-1).float()
-            loss = F.mse_loss(noise_pred, noise, reduction="none")
+            loss = F.mse_loss(model_output, target, reduction="none")
             # Apply weight and mask
             loss = (loss * mse_weight * mask).sum() / mask.sum().clamp(min=1)
         else:
-            loss = (F.mse_loss(noise_pred, noise, reduction="none") * mse_weight).mean()
+            loss = (F.mse_loss(model_output, target, reduction="none") * mse_weight).mean()
 
         # Requirement 5: Min-SNR Weighted MSE Loss
         # We will implement this in the next step, for now just standard MSE
@@ -238,7 +246,7 @@ class GaussianDiffusion(nn.Module):
 
         return {
             "loss": loss,
-            "noise_pred": noise_pred,
+            "model_output": model_output,
             "noise": noise,
             "t": t,
         }
