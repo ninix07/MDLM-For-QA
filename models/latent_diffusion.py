@@ -320,13 +320,13 @@ class LatentDiffusionQA(nn.Module):
              z_ans = z_0[subset_indices]
              t_ans = diff_output["t"][subset_indices]
              noise_ans = diff_output["noise"][subset_indices]
-             noise_pred_ans = diff_output["noise_pred"][subset_indices]
+             model_output_ans = diff_output["model_output"][subset_indices]
              
              # Reconstruct z_t (using the same noise/t as in training_loss)
              z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
              
-             # Predict x_0
-             pred_x0 = self.diffusion.predict_x0_from_noise(z_t_ans, t_ans, noise_pred_ans)
+             # Predict x_0 using the unified method
+             pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
              
              # Get null embedding
              null_emb = self.get_null_ans_embedding(z_0.device)

@@ -138,13 +138,34 @@ class GaussianDiffusion(nn.Module):
         z_t = sqrt_alpha * x_0 + sqrt_one_minus_alpha * noise
         return z_t, noise
 
+    def predict_x0(
+        self,
+        z_t: torch.Tensor,
+        t: torch.Tensor,
+        model_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict x_0 from z_t and model output (epsilon or v)."""
+        sqrt_alpha = self.scheduler._extract(
+            self.scheduler.sqrt_alphas_cumprod, t, z_t.shape
+        )
+        sqrt_one_minus_alpha = self.scheduler._extract(
+            self.scheduler.sqrt_one_minus_alphas_cumprod, t, z_t.shape
+        )
+        
+        if self.prediction_type == "epsilon":
+            return (z_t - sqrt_one_minus_alpha * model_output) / sqrt_alpha
+        elif self.prediction_type == "v":
+            return sqrt_alpha * z_t - sqrt_one_minus_alpha * model_output
+        else:
+            raise ValueError(f"Unknown prediction type: {self.prediction_type}")
+
     def predict_x0_from_noise(
         self,
         z_t: torch.Tensor,
         t: torch.Tensor,
         noise: torch.Tensor,
     ) -> torch.Tensor:
-        """Predict x_0 from z_t and predicted noise."""
+        """Predict x_0 from z_t and predicted noise (always assumes epsilon)."""
         sqrt_recip = self.scheduler._extract(
             self.scheduler.sqrt_recip_alphas_cumprod, t, z_t.shape
         )
