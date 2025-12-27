@@ -44,6 +44,7 @@ class LatentDiffusionQA(nn.Module):
         base_encoder: str = "xlm-roberta-base",
         false_negative_penalty_weight: float = 1.0,
         scaler: Optional[LatentScaler] = None,
+        prediction_type: str = "epsilon",
     ):
         super().__init__()
 
@@ -56,6 +57,7 @@ class LatentDiffusionQA(nn.Module):
         self.use_vae = use_vae
         self.false_negative_penalty_weight = false_negative_penalty_weight
         self.scaler = scaler
+        self.prediction_type = prediction_type
 
         # Ensure null answer token exists
         if null_ans_token not in tokenizer.get_vocab():
@@ -102,7 +104,7 @@ class LatentDiffusionQA(nn.Module):
             num_timesteps=num_train_timesteps,
             schedule_type=schedule_type,
         )
-        self.diffusion = GaussianDiffusion(self.scheduler)
+        self.diffusion = GaussianDiffusion(self.scheduler, prediction_type=prediction_type)
 
         # Sampler for inference
         self.sampler = CachedDDIMSampler(

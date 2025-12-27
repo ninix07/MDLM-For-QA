@@ -215,7 +215,8 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                     question_ids,
                     question_mask,
                     show_progress=False,
-                    num_inference_steps=50
+                    num_inference_steps=50,
+                    guidance_scale=get_config().inference.guidance_scale,
                 )
             
             # Decode predictions
@@ -309,7 +310,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./checkpoints")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate (overrides config if set)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_vae", action="store_true", default=True)
     parser.add_argument("--resume", type=str, default=None)
@@ -323,7 +324,8 @@ def main():
     config.training.output_dir = args.output_dir
     config.training.batch_size = args.batch_size
     config.training.num_epochs = args.epochs
-    config.training.learning_rate = args.lr
+    if args.lr is not None:
+        config.training.learning_rate = args.lr
     if args.vae_warmup_epochs is not None:
         config.training.vae_warmup_epochs = args.vae_warmup_epochs
     if args.vae_patience is not None:
@@ -398,6 +400,7 @@ def main():
         base_encoder=config.model.base_encoder,
         false_negative_penalty_weight=config.training.false_negative_penalty_weight,
         scaler=latent_scaler,
+        prediction_type=config.diffusion.prediction_type,
     )
     model = model.to(device)
     model.scheduler.to(device)
