@@ -416,7 +416,7 @@ def main():
     total_steps = steps_per_epoch * args.epochs
 
     # Optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
     # Only use AMP on CUDA
     use_amp = config.training.use_amp and device.type == "cuda"
@@ -581,7 +581,7 @@ def main():
         # Re-initialize optimizer for diffusion only
         # We need to filter out frozen parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
+        optimizer = AdamW(trainable_params, lr=config.training.learning_rate, weight_decay=0.01)
         
         # Re-init scheduler for diffusion phase with its own T_max
         # Use a small warmup for the diffusion phase to stabilize the denoiser
