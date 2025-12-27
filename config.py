@@ -29,7 +29,7 @@ class ModelConfig:
     vae_hidden_dim: int = 512
 
     # Max sequence lengths
-    max_context_length: int = 768  # Increased to 768
+    max_context_length: int = 512  # Reverted to 512 (BERT limit)
     max_question_length: int = 64  # Increased from 64 64 is good
     max_answer_length: int = 64  # Increased from 64
 
