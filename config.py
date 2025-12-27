@@ -17,9 +17,9 @@ class ModelConfig:
     latent_dim: int = 256  # VAE latent dimension (smaller than embedding_dim)
 
     # Denoiser Transformer config
-    denoiser_layers: int = 4  # Reduced from 6 for memory
+    denoiser_layers: int = 8  # Increased to 8 for deeper reasoning
     denoiser_heads: int = 8
-    denoiser_dim: int = 512  # Reduced from 768 for memory
+    denoiser_dim: int = 768  # Increased to 768 to eliminate bottleneck
     denoiser_ff_dim: int = 1024  # Reduced from 2048 for memory
     dropout: float = 0.1
 
@@ -29,8 +29,8 @@ class ModelConfig:
     vae_hidden_dim: int = 512
 
     # Max sequence lengths
-    max_context_length: int = 512  # Increased from 384
-    max_question_length: int = 100  # Increased from 64
+    max_context_length: int = 768  # Increased to 768
+    max_question_length: int = 64  # Increased from 64 64 is good
     max_answer_length: int = 64  # Increased from 64
 
     # Special tokens
@@ -73,7 +73,7 @@ class TrainingConfig:
     gradient_accumulation_steps: int = 8  # Effective batch size = 32
 
     # Learning rate
-    learning_rate: float = 5e-5
+    learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_steps: int = 1000
     max_grad_norm: float = 1.0
@@ -91,7 +91,7 @@ class TrainingConfig:
     use_amp: bool = True
 
     # Balanced batching for SQuAD 2.0
-    answerable_ratio: float = 0.5 # 65% answerable, 35% unanswerable
+    answerable_ratio: float = 0.65 # 65% answerable, 35% unanswerable
 
     # Auxiliary loss to keep latents close to valid embeddings
     use_embedding_loss: bool = True
@@ -117,7 +117,7 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    guidance_scale: float = 5.0
+    guidance_scale: float = 7.5
 
     # Null answer threshold
     null_ans_threshold: float = 0.6# Cosine similarity threshold

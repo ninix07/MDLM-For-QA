@@ -54,26 +54,99 @@ def compute_f1(a_gold: str, a_pred: str) -> float:
     return f1
 
 
-def compute_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
+def compute_detailed_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
     """
-    Compute average F1 and EM scores.
+    Compute detailed F1 and EM scores, broken down by class (Answerable vs Unanswerable).
     
-    Args:
-        predictions: List of predicted answer strings.
-        references: List of ground truth answer strings.
+    Returns:
+        Dict containing:
+        - f1, em: Overall scores
+        - has_ans_f1, has_ans_em: Scores for answerable questions
+        - no_ans_f1, no_ans_em: Scores for unanswerable questions
+        - total_preds: Total number of predictions
+        - total_has_ans: Total answerable references
+        - total_no_ans: Total unanswerable references
+        - pred_has_ans: Total predicted as answerable
+        - pred_no_ans: Total predicted as unanswerable
     """
     if not predictions or not references:
-        return {"f1": 0.0, "em": 0.0}
+        return {
+            "f1": 0.0, "em": 0.0,
+            "has_ans_f1": 0.0, "has_ans_em": 0.0,
+            "no_ans_f1": 0.0, "no_ans_em": 0.0,
+        }
 
     total_f1 = 0.0
     total_em = 0.0
-    count = len(predictions)
+    
+    has_ans_f1 = 0.0
+    has_ans_em = 0.0
+    has_ans_count = 0
+    
+    no_ans_f1 = 0.0
+    no_ans_em = 0.0
+    no_ans_count = 0
+    
+    pred_has_ans_count = 0
+    pred_no_ans_count = 0
 
     for pred, ref in zip(predictions, references):
-        total_f1 += compute_f1(ref, pred)
-        total_em += compute_exact(ref, pred)
+        # Calculate individual metrics
+        f1 = compute_f1(ref, pred)
+        em = compute_exact(ref, pred)
+        
+        total_f1 += f1
+        total_em += em
+        
+        # Determine if reference is "No Answer"
+        # In our pipeline, NoAns is represented as empty string ""
+        is_no_ans_ref = (len(get_tokens(ref)) == 0)
+        
+        # Determine if prediction is "No Answer"
+        is_no_ans_pred = (len(get_tokens(pred)) == 0)
+        
+        if is_no_ans_pred:
+            pred_no_ans_count += 1
+        else:
+            pred_has_ans_count += 1
+            
+        if is_no_ans_ref:
+            no_ans_count += 1
+            no_ans_f1 += f1
+            no_ans_em += em
+        else:
+            has_ans_count += 1
+            has_ans_f1 += f1
+            has_ans_em += em
 
-    return {
+    count = len(predictions)
+    
+    metrics = {
         "f1": 100.0 * total_f1 / count,
         "em": 100.0 * total_em / count,
+        "total_preds": count,
+        "total_has_ans": has_ans_count,
+        "total_no_ans": no_ans_count,
+        "pred_has_ans": pred_has_ans_count,
+        "pred_no_ans": pred_no_ans_count,
     }
+    
+    if has_ans_count > 0:
+        metrics["has_ans_f1"] = 100.0 * has_ans_f1 / has_ans_count
+        metrics["has_ans_em"] = 100.0 * has_ans_em / has_ans_count
+    else:
+        metrics["has_ans_f1"] = 0.0
+        metrics["has_ans_em"] = 0.0
+        
+    if no_ans_count > 0:
+        metrics["no_ans_f1"] = 100.0 * no_ans_f1 / no_ans_count
+        metrics["no_ans_em"] = 100.0 * no_ans_em / no_ans_count
+    else:
+        metrics["no_ans_f1"] = 0.0
+        metrics["no_ans_em"] = 0.0
+        
+    return metrics
+
+
+# Backward compatibility alias
+compute_metrics = compute_detailed_metrics

@@ -525,6 +525,8 @@ def main():
             val_kl = val_metrics.get("kl_loss", 0.0)
             
             print(f"Warmup Epoch {epoch+1}: Train VAE Loss = {avg_vae_loss:.4f}, Val VAE Loss = {val_vae_loss:.4f} (Recon={val_recon:.4f}, KL={val_kl:.4f}), F1 = {val_f1:.2f}, EM = {val_em:.2f}")
+            print(f"    HasAns: F1 = {val_metrics.get('has_ans_f1', 0):.2f}, EM = {val_metrics.get('has_ans_em', 0):.2f}")
+            print(f"    NoAns:  F1 = {val_metrics.get('no_ans_f1', 0):.2f}, EM = {val_metrics.get('no_ans_em', 0):.2f}")
             
             wandb.log({
                 "warmup/val_vae_loss": val_vae_loss,
@@ -532,6 +534,8 @@ def main():
                 "warmup/val_kl_loss": val_kl,
                 "warmup/val_f1": val_f1,
                 "warmup/val_em": val_em,
+                "warmup/val_has_ans_f1": val_metrics.get("has_ans_f1", 0),
+                "warmup/val_no_ans_f1": val_metrics.get("no_ans_f1", 0),
                 "warmup/epoch": epoch
             })
             
@@ -663,10 +667,20 @@ def main():
         print(
             f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}, F1 = {val_f1:.2f}, EM = {val_em:.2f}"
         )
+        print(f"    HasAns: F1 = {val_metrics['has_ans_f1']:.2f}, EM = {val_metrics['has_ans_em']:.2f} (Count: {val_metrics['total_has_ans']})")
+        print(f"    NoAns:  F1 = {val_metrics['no_ans_f1']:.2f}, EM = {val_metrics['no_ans_em']:.2f} (Count: {val_metrics['total_no_ans']})")
+        print(f"    Preds:  HasAns = {val_metrics['pred_has_ans']}, NoAns = {val_metrics['pred_no_ans']}")
+
         wandb.log({
             "val/loss": val_loss, 
             "val/f1": val_f1,
             "val/em": val_em,
+            "val/has_ans_f1": val_metrics["has_ans_f1"],
+            "val/has_ans_em": val_metrics["has_ans_em"],
+            "val/no_ans_f1": val_metrics["no_ans_f1"],
+            "val/no_ans_em": val_metrics["no_ans_em"],
+            "val/pred_has_ans": val_metrics["pred_has_ans"],
+            "val/pred_no_ans": val_metrics["pred_no_ans"],
             "epoch": epoch
         })
 

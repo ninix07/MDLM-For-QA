@@ -312,74 +312,31 @@ class LatentDiffusionQA(nn.Module):
              if len(subset_indices) > 4:
                  subset_indices = subset_indices[:4]
              
+             # Retrieve necessary tensors for the subset from diff_output
+             # We reuse the noise and t sampled in training_loss to avoid extra forward passes
              z_ans = z_0[subset_indices]
-             mask_ans = answer_mask[subset_indices]
-             cond_ids_ans = context_ids[subset_indices]
-             cond_mask_ans = context_mask[subset_indices]
-             q_ids_ans = question_ids[subset_indices]
-             q_mask_ans = question_mask[subset_indices]
+             t_ans = diff_output["t"][subset_indices]
+             noise_ans = diff_output["noise"][subset_indices]
+             noise_pred_ans = diff_output["noise_pred"][subset_indices]
+             
+             # Reconstruct z_t (using the same noise/t as in training_loss)
+             z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
+             
+             # Predict x_0
+             pred_x0 = self.diffusion.predict_x0_from_noise(z_t_ans, t_ans, noise_pred_ans)
              
              # Get null embedding
              null_emb = self.get_null_ans_embedding(z_0.device)
              if self.scaler is not None:
-                 # Normalize null embedding
                  null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
              
-             # We want to check if the model predicts 'null' for these.
-             # We can check the denoiser output at a random timestep.
-             t = torch.randint(0, self.scheduler.num_timesteps, (len(subset_indices),), device=z_0.device).long()
+             # Calculate distance
+             pred_mean = pred_x0.mean(dim=1)
+             null_mean = null_emb.mean(dim=0)
              
-             # Add noise
-             noise = torch.randn_like(z_ans)
-             z_t, _ = self.diffusion.q_sample(z_ans, t, noise)
+             dist = torch.norm(pred_mean - null_mean, p=2, dim=-1)
              
-             # Predict noise
-             noise_pred = self.denoiser(
-                 z_t, t, cond_ids_ans, cond_mask_ans, q_ids_ans, q_mask_ans, z_mask=mask_ans
-             )
-             
-             # Estimate x_0 (requires scheduler)
-             # self.scheduler.step() is for sampling. We need `predict_start_from_noise`.
-             # I'll assume `self.scheduler` has `predict_start_from_noise` or similar.
-             # If not, I can implement it manually: x0 = (xt - sqrt(1-alpha_cumprod)*eps) / sqrt(alpha_cumprod)
-             
-             # Let's try to access the scheduler's alphas.
-             # This is getting complicated without seeing `diffusion.py`.
-             # I'll just use the `read_file` tool in the next turn to be safe.
-             # But I need to finish this turn.
-             
-             # I'll comment out the penalty implementation details and put a TODO 
-             # or just implement the manual formula which is standard.
-             
-             alpha_cumprod = self.scheduler.alphas_cumprod.to(z_0.device)[t]
-             sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod).view(-1, 1, 1)
-             sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod).view(-1, 1, 1)
-             
-             pred_x0 = (z_t - sqrt_one_minus_alpha_cumprod * noise_pred) / sqrt_alpha_cumprod.clamp(min=1e-8)
-             
-             # Calculate distance to null
-             # null_emb: [dim] or [seq, dim]?
-             # get_null_ans_embedding returns [seq, dim] (squeezed) or [1, seq, dim]?
-             # In `get_null_ans_embedding`: `self._null_ans_embedding = null_emb.squeeze(0)` -> [seq, dim]
-             
-             # pred_x0: [batch, seq, dim]
-             # null_emb: [seq, dim]
-             
-             # Compute distance
-             # We can use cosine similarity or Euclidean distance.
-             # User mentioned "converging into everything being unanswerable".
-             # Let's use Euclidean distance.
-             
-             # Pool over sequence?
-             pred_mean = pred_x0.mean(dim=1) # [batch, dim]
-             null_mean = null_emb.mean(dim=0) # [dim]
-             
-             dist_sq = torch.sum((pred_mean - null_mean)**2, dim=-1)
-             dist = torch.sqrt(dist_sq + 1e-8) 
-             
-             # We want to MAXIMIZE distance (minimize -distance or exp(-distance))
-             # Penalty = ReLU(margin - distance)
-             # Only penalize if distance is smaller than margin
+             # Hinge loss: penalize if distance < margin
              margin = 2.0
              penalty = F.relu(margin - dist).mean()
              
