@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.amp import GradScaler, autocast
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from tqdm import tqdm
 
 from config import Config, get_config
@@ -415,9 +415,18 @@ def main():
     steps_per_epoch = len(train_loader) // accumulation_steps
     total_steps = steps_per_epoch * args.epochs
 
-    # Optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=0.01)
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
+    # Optimizer and scheduler for Phase 1 (VAE Warmup)
+    optimizer = AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
+    
+    # VAE Warmup total steps
+    vae_total_steps = steps_per_epoch * config.training.vae_warmup_epochs
+    
+    # Use linear warmup + cosine decay
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=config.training.warmup_steps, 
+        num_training_steps=vae_total_steps if vae_total_steps > 0 else 1
+    )
     # Only use AMP on CUDA
     use_amp = config.training.use_amp and device.type == "cuda"
     grad_scaler = GradScaler(amp_device) if use_amp else None
@@ -581,12 +590,24 @@ def main():
         # Re-initialize optimizer for diffusion only
         # We need to filter out frozen parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = AdamW(trainable_params, lr=config.training.learning_rate, weight_decay=0.01)
+        optimizer = AdamW(trainable_params, lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
         
         # Re-init scheduler for diffusion phase with its own T_max
-        # Use a small warmup for the diffusion phase to stabilize the denoiser
         diffusion_steps = steps_per_epoch * args.epochs
-        scheduler = CosineAnnealingLR(optimizer, T_max=diffusion_steps)
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=config.training.warmup_steps,
+            num_training_steps=diffusion_steps if diffusion_steps > 0 else 1
+        )
+        
+        # If we resumed, we need to reload the optimizer/scheduler state for the diffusion phase
+        if args.resume:
+            print("Reloading optimizer/scheduler state for diffusion phase...")
+            checkpoint = torch.load(args.resume, map_location=device)
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"]:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
         print(f"Trainable parameters (Diffusion only): {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
