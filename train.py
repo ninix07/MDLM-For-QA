@@ -175,6 +175,9 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     
     all_predictions = []
     all_references = []
+    debug_sample = None
+    import random
+    debug_batch_idx = random.randint(1, max_metric_batches)
 
     for batch in tqdm(val_loader, desc="Validating"):
         context_ids = batch["context_input_ids"].to(device)
@@ -231,26 +234,41 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             all_predictions.extend(pred_texts)
             all_references.extend(ref_texts)
             
-            # Show debug for a random batch (not always batch 0)
-            import random
-            if num_batches == 1:
-                debug_batch_idx = random.randint(1, min(max_metric_batches, 10))
             if num_batches == debug_batch_idx:
                 sample_idx = random.randint(0, len(pred_texts) - 1)
-                print(f"\n[DEBUG] Random Batch {num_batches}, Sample {sample_idx}:")
-                print(f"Answer IDs: {answer_ids[sample_idx, :10].tolist()}")
-                print(f"Gen Tokens: {gen_outputs['tokens'][sample_idx, :10].tolist()}")
-                print(f"Pred Text: '{pred_texts[sample_idx]}'")
-                print(f"Ref Text: '{ref_texts[sample_idx]}'")
-                print(f"Is Null Ref: {is_null_ref[sample_idx]}")
-                print(f"Is Null Pred: {gen_outputs['is_null'][sample_idx]}")
-                # Add latent dimension info for diffusion phase
+                debug_sample = {
+                    "batch_idx": num_batches,
+                    "sample_idx": sample_idx,
+                    "answer_ids": answer_ids[sample_idx, :10].tolist(),
+                    "gen_tokens": gen_outputs['tokens'][sample_idx, :10].tolist(),
+                    "pred_text": pred_texts[sample_idx],
+                    "ref_text": ref_texts[sample_idx],
+                    "is_null_ref": is_null_ref[sample_idx].item(),
+                    "is_null_pred": gen_outputs['is_null'][sample_idx].item(),
+                }
                 if not train_vae_only and 'latent' in gen_outputs:
                     latent = gen_outputs['latent']
-                    print(f"Generated Latent Shape: {latent.shape} (expected: [batch, 100, 128])")
-                    print(f"Latent Mean: {latent.mean().item():.4f}, Std: {latent.std().item():.4f}")
+                    debug_sample.update({
+                        "latent_shape": list(latent.shape),
+                        "latent_mean": latent.mean().item(),
+                        "latent_std": latent.std().item(),
+                    })
+            
 
     avg_loss = total_loss / max(num_batches, 1)
+    
+    # Print debug info after loop
+    if debug_sample:
+        print(f"\n[DEBUG] Random Batch {debug_sample['batch_idx']}, Sample {debug_sample['sample_idx']}:")
+        print(f"Answer IDs: {debug_sample['answer_ids']}")
+        print(f"Gen Tokens: {debug_sample['gen_tokens']}")
+        print(f"Pred Text: '{debug_sample['pred_text']}'")
+        print(f"Ref Text: '{debug_sample['ref_text']}'")
+        print(f"Is Null Ref: {debug_sample['is_null_ref']}")
+        print(f"Is Null Pred: {debug_sample['is_null_pred']}")
+        if "latent_shape" in debug_sample:
+            print(f"Generated Latent Shape: {debug_sample['latent_shape']}")
+            print(f"Latent Mean: {debug_sample['latent_mean']:.4f}, Std: {debug_sample['latent_std']:.4f}")
     
     # Compute metrics
     metrics = compute_metrics(all_predictions, all_references)
@@ -654,7 +672,6 @@ def main():
                 {
                     "loss": f"{metrics['loss']:.4f}",
                     "diff": f"{metrics['diff_loss']:.4f}",
-                    "vae": f"{metrics['vae_loss']:.4f}",
                     "pen": f"{metrics['penalty']:.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                 }
@@ -663,7 +680,6 @@ def main():
                 {
                     "train/loss": metrics["loss"],
                     "train/diffusion_loss": metrics["diff_loss"],
-                    "train/vae_loss": metrics["vae_loss"],
                     "train/penalty": metrics["penalty"],
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
