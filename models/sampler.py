@@ -219,9 +219,19 @@ class CachedDDIMSampler:
         # CFG Prep: Encode unconditional if needed
         is_cfg = guidance_scale != 1.0 and uncond_context_ids is not None
         if is_cfg:
-            uncond_condition, uncond_condition_mask = model.encode_condition(
-                uncond_context_ids, uncond_context_mask, uncond_question_ids, uncond_question_mask
-            )
+            # Cache unconditional condition to avoid redundant BERT runs
+            # The unconditional input is usually constant (PAD tokens)
+            if (not hasattr(self, "_cached_uncond") or 
+                self._cached_uncond[0].shape[0] != batch_size or
+                self._cached_uncond[0].device != device):
+                
+                uncond_condition, uncond_condition_mask = model.encode_condition(
+                    uncond_context_ids, uncond_context_mask, uncond_question_ids, uncond_question_mask
+                )
+                self._cached_uncond = (uncond_condition, uncond_condition_mask)
+            else:
+                uncond_condition, uncond_condition_mask = self._cached_uncond
+
             # Concatenate for batch processing [2*B, seq, dim]
             condition = torch.cat([condition, uncond_condition])
             condition_mask = torch.cat([condition_mask, uncond_condition_mask])

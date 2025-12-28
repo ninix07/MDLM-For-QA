@@ -478,37 +478,42 @@ class LatentDiffusionQA(nn.Module):
         is_null: torch.Tensor,
     ) -> list:
         """Convert token IDs to text strings."""
-        texts = []
+        batch_size = tokens.shape[0]
+        texts = [""] * batch_size
+        
+        # Identify non-null indices
+        active_indices = torch.where(~is_null)[0]
+        if len(active_indices) == 0:
+            return texts
+            
+        active_tokens = tokens[active_indices]
+        
+        # 2. THE EOS TRICK: Find the first occurrence of a Stop Token
+        # This acts as a 'Wall' that stops the decoder from reading gibberish.
         sep_id = self.tokenizer.sep_token_id 
         pad_id = self.tokenizer.pad_token_id 
-        stop_tokens = {sep_id, pad_id}  
-        for i in range(tokens.shape[0]):
-            if is_null[i]:
-                texts.append("")
-            else:
-                # Convert the row of token IDs to a standard Python list
-                token_ids = tokens[i].tolist()
+        
+        # Convert to list for easier processing if needed, but batch_decode is better
+        # We still need to truncate at the first stop token for each sequence
+        truncated_tokens = []
+        for i in range(len(active_tokens)):
+            row = active_tokens[i].tolist()
+            stop_idx = len(row)
+            for idx, tid in enumerate(row):
+                if tid == sep_id or tid == pad_id:
+                    stop_idx = idx
+                    break
+            truncated_tokens.append(row[:stop_idx])
             
-            # 2. THE EOS TRICK: Find the first occurrence of a Stop Token
-            # This acts as a 'Wall' that stops the decoder from reading gibberish.
-                stop_idx = len(token_ids)
-                for idx, tid in enumerate(token_ids):
-                    if tid in stop_tokens:
-                        stop_idx = idx
-                        break
-            
-            # 3. Slice the list to remove everything after (and including) the stop token
-                valid_ids = token_ids[:stop_idx]
-            
-            # 4. Decode only the valid tokens into a clean string
-            # skip_special_tokens=True is used as a safety layer for CLS or other markers.
-                text = self.tokenizer.decode(
-                    valid_ids, 
-                    skip_special_tokens=True, 
-                    clean_up_tokenization_spaces=True
-                )
-            
-            # Final cleanup of leading/trailing whitespace
-                texts.append(text.strip())
+        # 4. Decode only the valid tokens into clean strings
+        decoded_texts = self.tokenizer.batch_decode(
+            truncated_tokens, 
+            skip_special_tokens=True, 
+            clean_up_tokenization_spaces=True
+        )
+        
+        # Fill in the results
+        for idx, text in zip(active_indices.tolist(), decoded_texts):
+            texts[idx] = text.strip()
             
         return texts

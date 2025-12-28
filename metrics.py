@@ -8,19 +8,21 @@ import string
 from typing import List, Dict
 
 
+# Pre-compile regex for performance
+ARTICLES_REGEX = re.compile(r"\b(a|an|the)\b", re.UNICODE)
+PUNCTUATION_SET = set(string.punctuation)
+
 def normalize_answer(s: str) -> str:
     """Lower text and remove punctuation, articles and extra whitespace."""
 
     def remove_articles(text):
-        regex = re.compile(r"\b(a|an|the)\b", re.UNICODE)
-        return re.sub(regex, " ", text)
+        return ARTICLES_REGEX.sub(" ", text)
 
     def white_space_fix(text):
         return " ".join(text.split())
 
     def remove_punc(text):
-        exclude = set(string.punctuation)
-        return "".join(ch for ch in text if ch not in exclude)
+        return "".join(ch for ch in text if ch not in PUNCTUATION_SET)
 
     def lower(text):
         return text.lower()
@@ -38,20 +40,24 @@ def compute_exact(a_gold: str, a_pred: str) -> int:
     return int(normalize_answer(a_gold) == normalize_answer(a_pred))
 
 
-def compute_f1(a_gold: str, a_pred: str) -> float:
-    gold_toks = get_tokens(a_gold)
-    pred_toks = get_tokens(a_pred)
+def compute_f1_from_tokens(gold_toks: List[str], pred_toks: List[str]) -> float:
     common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
     num_same = sum(common.values())
     if len(gold_toks) == 0 or len(pred_toks) == 0:
         # If either is no-answer, then F1 is 1 if they agree, 0 otherwise
-        return int(gold_toks == pred_toks)
+        return float(gold_toks == pred_toks)
     if num_same == 0:
-        return 0
+        return 0.0
     precision = 1.0 * num_same / len(pred_toks)
     recall = 1.0 * num_same / len(gold_toks)
     f1 = (2 * precision * recall) / (precision + recall)
     return f1
+
+
+def compute_f1(a_gold: str, a_pred: str) -> float:
+    gold_toks = get_tokens(a_gold)
+    pred_toks = get_tokens(a_pred)
+    return compute_f1_from_tokens(gold_toks, pred_toks)
 
 
 def compute_detailed_metrics(predictions: List[str], references: List[str]) -> Dict[str, float]:
@@ -92,18 +98,20 @@ def compute_detailed_metrics(predictions: List[str], references: List[str]) -> D
 
     for pred, ref in zip(predictions, references):
         # Calculate individual metrics
-        f1 = compute_f1(ref, pred)
-        em = compute_exact(ref, pred)
+        gold_toks = get_tokens(ref)
+        pred_toks = get_tokens(pred)
+        
+        f1 = compute_f1_from_tokens(gold_toks, pred_toks)
+        em = int(normalize_answer(ref) == normalize_answer(pred))
         
         total_f1 += f1
         total_em += em
         
         # Determine if reference is "No Answer"
-        # In our pipeline, NoAns is represented as empty string ""
-        is_no_ans_ref = (len(get_tokens(ref)) == 0)
+        is_no_ans_ref = (len(gold_toks) == 0)
         
         # Determine if prediction is "No Answer"
-        is_no_ans_pred = (len(get_tokens(pred)) == 0)
+        is_no_ans_pred = (len(pred_toks) == 0)
         
         if is_no_ans_pred:
             pred_no_ans_count += 1
