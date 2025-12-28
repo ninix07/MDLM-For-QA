@@ -159,7 +159,7 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=50, kl_weight=0.1):
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.1):
     """
     Validation loop with F1 and EM metrics.
     
@@ -218,7 +218,7 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
                     question_ids,
                     question_mask,
                     show_progress=False,
-                    num_inference_steps=50,
+                    num_inference_steps=20,
                     guidance_scale=get_config().inference.guidance_scale,
                 )
             
@@ -233,6 +233,9 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             
             all_predictions.extend(pred_texts)
             all_references.extend(ref_texts)
+            
+            if num_batches == max_metric_batches:
+                print(f"\n[INFO] Completed generation for {max_metric_batches} batches. Switching to fast loss-only validation for remaining batches...")
             
             if num_batches == debug_batch_idx:
                 sample_idx = random.randint(0, len(pred_texts) - 1)
@@ -547,7 +550,7 @@ def main():
             avg_vae_loss = epoch_vae_loss / len(train_loader)
             
             # Validate VAE
-            val_metrics = validate(model, val_loader, device, train_vae_only=True, max_metric_batches=50)
+            val_metrics = validate(model, val_loader, device, train_vae_only=True, max_metric_batches=20)
             val_vae_loss = val_metrics["loss"]
             val_f1 = val_metrics["f1"]
             val_em = val_metrics["em"]
@@ -699,7 +702,7 @@ def main():
                 )
 
         avg_train_loss = epoch_loss / len(train_loader)
-        val_metrics = validate(model, val_loader, device, max_metric_batches=50)
+        val_metrics = validate(model, val_loader, device, max_metric_batches=20)
         val_loss = val_metrics["loss"]
         val_f1 = val_metrics["f1"]
         val_em = val_metrics["em"]
