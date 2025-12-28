@@ -49,11 +49,28 @@ class ConditionalTransformerBlock(nn.Module):
 
         # B. Self-Attention (Gated Residual)
         h = self.modulate(self.self_attn_norm(x), sft1, scl1)
+        
+        # SAFETY CHECK: Ensure x_mask is never all-zero
+        if x_mask is not None:
+            # key_padding_mask: True means IGNORE. If all are True, it's all-zero.
+            all_masked = x_mask.all(dim=1)
+            if all_masked.any():
+                x_mask = x_mask.clone()
+                x_mask[all_masked, 0] = False # Unmask first token
+                
         h, _ = self.self_attn(h, h, h, key_padding_mask=x_mask)
         x = x + gt1.unsqueeze(1) * h
-
+        
         # C. Cross-Attention (Gated Residual)
         h = self.modulate(self.cross_attn_norm(x), sft2, scl2)
+        
+        # SAFETY CHECK: Ensure condition_mask is never all-zero
+        if condition_mask is not None:
+            all_masked = condition_mask.all(dim=1)
+            if all_masked.any():
+                condition_mask = condition_mask.clone()
+                condition_mask[all_masked, 0] = False # Unmask first token
+                
         h, _ = self.cross_attn(h, condition, condition, key_padding_mask=condition_mask)
         x = x + gt2.unsqueeze(1) * h
 

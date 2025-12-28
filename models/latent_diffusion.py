@@ -328,6 +328,11 @@ class LatentDiffusionQA(nn.Module):
              # Predict x_0 using the unified method
              pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
              
+             # STABLE NORMALIZATION: Clip pred_x0 to prevent inf values
+             # Latents are typically unit variance, so [-20, 20] is a very safe bound
+             # that prevents overflow during norm calculation.
+             pred_x0 = torch.clamp(pred_x0, -20.0, 20.0)
+             
              # Get null embedding
              null_emb = self.get_null_ans_embedding(z_0.device)
              if self.scaler is not None:
@@ -354,6 +359,10 @@ class LatentDiffusionQA(nn.Module):
              penalty = null_proximity.mean()
              
              penalty_loss = self.false_negative_penalty_weight * penalty
+             
+             # FINAL SAFETY CHECK: Zero out if NaN or Inf
+             if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
+                 penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
         # Scale penalty_loss by 5.0 to break the Null attractor
         # Making false negatives the most expensive mistake

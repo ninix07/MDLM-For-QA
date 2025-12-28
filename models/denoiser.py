@@ -81,6 +81,14 @@ class ConditionalDenoiser(nn.Module):
         question_emb = self.condition_proj(question_out)
         condition = torch.cat([question_emb, context_emb], dim=1)
         condition_mask = torch.cat([question_mask, context_mask], dim=1)
+        
+        # SAFETY CHECK: Ensure mask is never all-zero (all padding)
+        # If all tokens are masked, MultiheadAttention produces NaNs.
+        # We force the first token to be unmasked if the entire row is masked.
+        all_masked = (condition_mask.sum(dim=1) == 0)
+        if all_masked.any():
+            condition_mask[all_masked, 0] = 1
+            
         condition_mask = ~condition_mask.bool()
         return condition, condition_mask
 
