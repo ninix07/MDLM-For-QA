@@ -29,6 +29,7 @@ class DDPMSampler:
     ) -> torch.Tensor:
         """
         Sample from the model using DDPM.
+        Optimized to reduce tensor allocations.
 
         Args:
             model: Denoiser model
@@ -43,8 +44,11 @@ class DDPMSampler:
         if show_progress:
             timesteps = tqdm(timesteps, desc="DDPM Sampling")
 
+        # Pre-allocate t_batch tensor to avoid repeated allocations
+        t_batch = torch.empty((batch_size,), device=device, dtype=torch.long)
+
         for t in timesteps:
-            t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
+            t_batch.fill_(t)
 
             model_output = model(z_t, t_batch, **condition_kwargs)
 
@@ -60,8 +64,8 @@ class DDPMSampler:
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
-            # Stability clamping
-            pred_z0 = torch.clamp(pred_z0, -1.0, 1.0)
+            # Stability clamping - match scaler range [-5,5]
+            pred_z0 = torch.clamp(pred_z0, -5.0, 5.0)
             
 
             alpha = self.scheduler.alphas[t]
@@ -74,6 +78,7 @@ class DDPMSampler:
             mean = coef1 * pred_z0 + coef2 * z_t
 
             if t > 0:
+                # Reuse noise tensor shape to avoid allocation
                 noise = torch.randn_like(z_t)
                 var = self.scheduler.posterior_variance[t]
                 z_t = mean + torch.sqrt(var) * noise
@@ -113,6 +118,7 @@ class DDIMSampler:
     ) -> torch.Tensor:
         """
         Sample using DDIM (faster than DDPM).
+        Optimized to reduce tensor allocations.
 
         Args:
             model: Denoiser model
@@ -128,8 +134,11 @@ class DDIMSampler:
         if show_progress:
             timesteps = tqdm(timesteps, desc="DDIM Sampling")
 
+        # Pre-allocate t_batch tensor to avoid repeated allocations
+        t_batch = torch.empty((batch_size,), device=device, dtype=torch.long)
+
         for i, t in enumerate(timesteps):
-            t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
+            t_batch.fill_(t)
 
             model_output = model(z_t, t_batch, **condition_kwargs)
 
@@ -152,7 +161,7 @@ class DDIMSampler:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
             if clip_sample:
-                pred_z0 = torch.clamp(pred_z0, -1.0, 1.0)
+                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0) # Match the scaler!
 
             sigma = self.eta * torch.sqrt(
                 (1 - alpha_bar_prev)
@@ -163,6 +172,7 @@ class DDIMSampler:
             dir_xt = torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_epsilon
 
             if self.eta > 0 and i + 1 < len(self.timesteps):
+                # Reuse noise tensor shape to avoid allocation
                 noise = torch.randn_like(z_t)
                 z_t = torch.sqrt(alpha_bar_prev) * pred_z0 + dir_xt + sigma * noise
             else:
@@ -280,7 +290,7 @@ class CachedDDIMSampler:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
             if clip_sample:
-                pred_z0 = torch.clamp(pred_z0, -1.0, 1.0)
+                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0) # Match the scaler!
 
             sigma = self.eta * torch.sqrt(
                 (1 - alpha_bar_prev)

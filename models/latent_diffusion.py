@@ -68,24 +68,9 @@ class LatentDiffusionQA(nn.Module):
 
         vocab_size = len(tokenizer)
         embedding_dim = 768  # BERT base hidden size (always 768, not d_model)
-
-        # VAE or Embedding Bridge
-        if use_vae:
-            self.vae = SequenceVAE(
-                vocab_size=len(tokenizer),
-                embedding_dim=embedding_dim,  # Use actual BERT dim (768), not d_model
-                latent_dim=latent_dim,
-                num_layers=4,
-                num_heads=8,
-                dropout=dropout,
-                pretrained_embeddings=None,
-                pad_token_id=self.pad_token_id,
-            )
-            actual_latent_dim = latent_dim
-        else:
-            self.vae = EmbeddingBridge(model_name=base_encoder)
-            actual_latent_dim = embedding_dim
-            self.latent_dim = embedding_dim
+        
+        # Determine actual latent dimension
+        actual_latent_dim = latent_dim if use_vae else embedding_dim
 
         # Denoiser
         self.denoiser = ConditionalDenoiser(
@@ -99,10 +84,38 @@ class LatentDiffusionQA(nn.Module):
             condition_encoder=base_encoder,
         )
 
+        # Extract pretrained embeddings from denoiser's condition encoder
+        pretrained_embeddings = None
+        if hasattr(self.denoiser.condition_encoder, 'embeddings'):
+            # BERT/RoBERTa style
+            pretrained_embeddings = self.denoiser.condition_encoder.embeddings.word_embeddings
+        elif hasattr(self.denoiser.condition_encoder, 'model'):
+            # XLM-R style (sometimes wrapped)
+            pretrained_embeddings = self.denoiser.condition_encoder.model.embeddings.word_embeddings
+        else:
+            print("Warning: Could not extract pretrained embeddings from denoiser")
+
+        # VAE or Embedding Bridge
+        if use_vae:
+            self.vae = SequenceVAE(
+                vocab_size=len(tokenizer),
+                embedding_dim=embedding_dim,  # Use actual BERT dim (768), not d_model
+                latent_dim=latent_dim,
+                num_layers=4,
+                num_heads=8,
+                dropout=dropout,
+                pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
+                pad_token_id=self.pad_token_id,
+            )
+        else:
+            self.vae = EmbeddingBridge(model_name=base_encoder)
+            self.latent_dim = embedding_dim
+
         # Noise scheduler and diffusion
         self.scheduler = NoiseScheduler(
             num_timesteps=num_train_timesteps,
             schedule_type=schedule_type,
+            device=None,  # Will be set when model is moved to device
         )
         self.diffusion = GaussianDiffusion(self.scheduler, prediction_type=prediction_type)
 
@@ -517,3 +530,10 @@ class LatentDiffusionQA(nn.Module):
             texts[idx] = text.strip()
             
         return texts
+
+    def to(self, device: torch.device):
+        """Move model and scheduler to device with optimization."""
+        super().to(device)
+        # Move scheduler tensors to device efficiently
+        self.scheduler.to(device)
+        return self

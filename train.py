@@ -25,7 +25,7 @@ from models.scaler import LatentScaler
 from metrics import compute_metrics
 
 
-def get_kl_weight(current_step: int, total_steps: int, target_kl: float = 0.1, cycles: int = 4) -> float:
+def get_kl_weight(current_step: int, total_steps: int, target_kl: float = 0.01, cycles: int = 4) -> float:
     """
     Calculate KL weight using cyclic linear annealing.
     """
@@ -82,7 +82,7 @@ def debug_dimensions(model, batch, device, epoch_num):
 
 
 def train_step(
-    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.1
+    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.01
 ):
     """Single training step with gradient accumulation support."""
     context_ids = batch["context_input_ids"].to(device)
@@ -159,7 +159,7 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.1):
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.01):
     """
     Validation loop with F1 and EM metrics.
     
@@ -423,8 +423,7 @@ def main():
         scaler=latent_scaler,
         prediction_type=config.diffusion.prediction_type,
     )
-    model = model.to(device)
-    model.scheduler.to(device)
+    model = model.to(device)  # This now also moves scheduler efficiently
     
     # Watch model gradients and topology
     wandb.watch(model, log="all", log_freq=100)
@@ -502,7 +501,7 @@ def main():
             for batch_idx, batch in enumerate(pbar):
                 # Calculate KL weight for this step
                 current_step = epoch * len(train_loader) + batch_idx
-                current_kl = get_kl_weight(current_step, total_warmup_steps, target_kl=0.1, cycles=4)
+                current_kl = get_kl_weight(current_step, total_warmup_steps, target_kl=0.01, cycles=4)
                 
                 metrics = train_step(
                     model,
