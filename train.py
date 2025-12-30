@@ -68,7 +68,7 @@ def get_grad_norm(model: nn.Module) -> float:
     return total_norm ** 0.5
 
 
-def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch: int):
+def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch: int, grad_norm: Optional[float] = None):
     """
     Log comprehensive vital signs for VAE-Diffusion system health monitoring.
     
@@ -79,6 +79,7 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
         diffusion_output: Output from diffusion forward pass
         step: Current training step
         epoch: Current epoch number
+        grad_norm: Unscaled gradient norm (if available from optimizer step)
     """
     device = next(model.parameters()).device
     
@@ -139,18 +140,19 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
             sample_question_mask = batch["question_attention_mask"][:sample_size].to(device)
             
             try:
-                sample_outputs = model(
+                # Use model.generate for proper null prediction check
+                # We use a reduced number of steps for speed
+                sample_outputs = model.generate(
                     sample_context_ids, sample_context_mask,
                     sample_question_ids, sample_question_mask,
-                    sample_answer_ids, sample_answer_mask,
-                    kl_weight=0.01
+                    num_inference_steps=10,  # Fast check
+                    show_progress=False
                 )
                 
                 # Null prediction rate
-                null_logits = sample_outputs.get("null_logits", None)
-                if null_logits is not None:
-                    null_preds = (null_logits > model.null_threshold).float()
-                    null_prediction_rate = null_preds.mean().item()
+                is_null = sample_outputs.get("is_null", None)
+                if is_null is not None:
+                    null_prediction_rate = is_null.float().mean().item()
                 else:
                     null_prediction_rate = 0.0
                 
@@ -163,6 +165,7 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
                     
             except Exception as e:
                 # Fallback if inference fails
+                print(f"Vital signs inference failed: {e}")
                 null_prediction_rate = 0.0
                 avg_null_sim = 0.0
     else:
@@ -170,7 +173,10 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
         avg_null_sim = None
     
     # 5. Gradient Health
-    grad_norm = get_grad_norm(model)
+    # If grad_norm is not provided (e.g. accumulation step), use a placeholder or previous?
+    # Better to just log what we have. If 0.0, it means no update.
+    if grad_norm is None:
+        grad_norm = 0.0
     
     # Compile vital signs log
     vital_logs = {
@@ -239,7 +245,7 @@ def check_kill_signals(logs: dict, step: int, epoch: int):
     # Gradient Health Checks
     if logs["vital/grad_norm"] > 10.0:
         warnings.append(f"🚨 GRADIENT EXPLOSION: Norm {logs['vital/grad_norm']:.2f} > 10.0")
-    elif logs["vital/grad_norm"] < 1e-4:
+    elif logs["vital/grad_norm"] < 1e-4 and logs["vital/grad_norm"] > 0.0:
         warnings.append(f"🚨 VANISHING GRADIENTS: Norm {logs['vital/grad_norm']:.6f} < 1e-4")
     
     # Task-Specific Checks
@@ -330,14 +336,14 @@ def debug_dimensions(model, batch, device, epoch_num):
         print(f"\n[DEBUG Epoch {epoch_num}] Dimension Verification:")
         print(f"    Sample Answer: '{answer_text[:50]}...' " if len(answer_text) > 50 else f"    Sample Answer: '{answer_text}'")
         print(f"    BERT Embeddings: {embeddings.shape} (expected: [1, seq, 768])")
-        print(f"    VAE Latent (z):  {z.shape} (expected: [1, 8, 128] for VAE or [1, seq, 768] for Bridge)")
-        print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 128 else f"    ❌ ERROR: Expected 128, got {z.shape[-1]}")
+        print(f"    VAE Latent (z):  {z.shape} (expected: [1, 8, 768] for VAE or [1, seq, 768] for Bridge)")
+        print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 768 else f"    ❌ ERROR: Expected 768, got {z.shape[-1]}")
     model.train()
 
 
 
 def train_step(
-    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.01, global_step=0, epoch=0
+    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=1e-5, global_step=0, epoch=0
 ):
     """Single training step with gradient accumulation support and vital signs monitoring."""
     context_ids = batch["context_input_ids"].to(device)
@@ -350,6 +356,8 @@ def train_step(
     # Zero gradients at the start of accumulation
     if step_idx % accumulation_steps == 0:
         optimizer.zero_grad(set_to_none=True)
+
+    current_grad_norm = None
 
     if use_amp and grad_scaler is not None:
         with autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -369,9 +377,13 @@ def train_step(
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
             grad_scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
             grad_scaler.step(optimizer)
             grad_scaler.update()
+        else:
+            # Estimate unscaled norm for monitoring
+            scale = grad_scaler.get_scale()
+            current_grad_norm = get_grad_norm(model) / scale
     else:
         outputs = model(
             context_ids,
@@ -388,8 +400,10 @@ def train_step(
 
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
             optimizer.step()
+        else:
+            current_grad_norm = get_grad_norm(model)
 
     # Extract VAE and diffusion outputs for monitoring accurately
     vae_output = {
@@ -411,7 +425,7 @@ def train_step(
     if global_step % log_every == 0:
         # During warmup, step_idx + 1 might not align with accumulation, 
         # but we want vital signs anyway to monitor health.
-        log_vital_signs(model, batch, vae_output, diffusion_output, global_step, epoch)
+        log_vital_signs(model, batch, vae_output, diffusion_output, global_step, epoch, grad_norm=current_grad_norm)
         
         # Log token accuracy if VAE is active
         if vae_output["z"] is not None:
@@ -436,11 +450,12 @@ def train_step(
         "penalty": outputs.get("penalty", torch.tensor(0.0)).item(),
         "mean_norm": mean_norm,
         "std_mean": std_mean,
+        "grad_norm": current_grad_norm if current_grad_norm is not None else 0.0,
     }
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.01, global_step=0, epoch=0):
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=1e-5, global_step=0, epoch=0):
     """
     Validation loop with F1 and EM metrics and vital signs monitoring.
     
@@ -811,9 +826,8 @@ def main():
             total_warmup_steps = config.training.vae_warmup_epochs * len(train_loader)
             
             for batch_idx, batch in enumerate(pbar):
-                # Calculate KL weight for this step
-                current_step = epoch * len(train_loader) + batch_idx
-                current_kl = get_kl_weight(current_step, total_warmup_steps, target_kl=0.01, cycles=4)
+                # Constant KL weight for "Wide & Loose" VAE
+                current_kl = 1e-5
                 
                 metrics = train_step(
                     model,
@@ -839,9 +853,9 @@ def main():
                 pbar.set_postfix(
                     {
                         "vae_loss": f"{metrics['vae_loss']:.4f}",
-                        "vae_loss": f"{metrics['vae_loss']:.4f}",
                         "kl_w": f"{current_kl:.4f}",
                         "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                        "gn": f"{metrics['grad_norm']:.2f}",
                     }
                 )
                 # Increment global step for VAE warmup too, or keep separate?
@@ -858,6 +872,7 @@ def main():
                             "warmup/vae_loss": metrics["vae_loss"],
                             "warmup/kl_weight": current_kl,
                             "warmup/lr": scheduler.get_last_lr()[0],
+                            "warmup/grad_norm": metrics["grad_norm"],
                             "warmup/epoch": epoch,
                             "warmup/step": current_step,
                         }
@@ -996,6 +1011,7 @@ def main():
                     "diff": f"{metrics['diff_loss']:.4f}",
                     "pen": f"{metrics['penalty']:.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+                    "gn": f"{metrics['grad_norm']:.2f}",
                 }
             )
             wandb.log(
@@ -1004,6 +1020,7 @@ def main():
                     "train/diffusion_loss": metrics["diff_loss"],
                     "train/penalty": metrics["penalty"],
                     "train/lr": scheduler.get_last_lr()[0],
+                    "train/grad_norm": metrics["grad_norm"],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
                 }

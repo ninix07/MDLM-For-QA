@@ -129,7 +129,7 @@ class SequenceVAE(nn.Module):
         vocab_size: int,
         embedding_dim: int = 768,
         latent_dim: int = 128,
-        num_layers: int = 4,
+        num_layers: int = 6,
         num_heads: int = 8,
         dropout: float = 0.1,
         pretrained_embeddings: Optional[nn.Embedding] = None,

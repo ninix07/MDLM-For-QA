@@ -100,7 +100,7 @@ class LatentDiffusionQA(nn.Module):
                 vocab_size=len(tokenizer),
                 embedding_dim=embedding_dim,  # Use actual BERT dim (768), not d_model
                 latent_dim=latent_dim,
-                num_layers=4,
+                num_layers=6,
                 num_heads=12,
                 dropout=dropout,
                 pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
