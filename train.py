@@ -40,8 +40,10 @@ def get_kl_weight(current_step: int, total_steps: int, target_kl: float = 0.01, 
     
     if current_cycle_step >= warmup_steps:
         return target_kl
-        
-    return target_kl * (current_cycle_step / max(1, warmup_steps))
+    
+    # Start from 10% of target, not 0, to prevent early collapse
+    min_kl = target_kl * 0.1
+    return min_kl + (target_kl - min_kl) * (current_cycle_step / max(1, warmup_steps))
 
 
 
@@ -202,8 +204,8 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
     if avg_null_sim is not None:
         vital_logs["vital/null_cosine_sim"] = avg_null_sim
     
-    # Log to wandb
-    wandb.log(vital_logs, step=step)
+    # Log to wandb (no explicit step - let wandb auto-increment to avoid step conflicts)
+    wandb.log(vital_logs)
     
     # Check for kill signals and print warnings
     check_kill_signals(vital_logs, step, epoch)
@@ -295,14 +297,8 @@ def log_token_accuracy(model, batch, vae_output, step: int):
     
     avg_char_accuracy = sum(char_accuracies) / len(char_accuracies) if char_accuracies else 0.0
     
-    # Log token accuracy metrics
-    token_logs = {
-        "accuracy/token_accuracy": token_accuracy.item(),
-        "accuracy/exact_match": exact_match.item(),
-        "accuracy/char_accuracy": avg_char_accuracy,
-    }
-    
-    wandb.log(token_logs, step=step)
+    # Log token accuracy metrics (no explicit step - let wandb auto-increment)
+    wandb.log(token_logs)
     
     return token_accuracy.item(), exact_match.item(), avg_char_accuracy
 

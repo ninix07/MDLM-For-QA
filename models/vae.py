@@ -478,7 +478,8 @@ class SequenceVAE(nn.Module):
         logvar = self.to_logvar(encoded)
         
         # Clamp logvar to prevent instability
-        logvar = torch.clamp(logvar, -30, 20)
+        # [-10, 2] prevents near-zero variance (exp(-10) ≈ 0.00005) while allowing reasonable range
+        logvar = torch.clamp(logvar, -10, 2)
 
         # Reparameterization
         std = torch.exp(0.5 * logvar)
@@ -569,8 +570,12 @@ class SequenceVAE(nn.Module):
         num_valid_tokens = (input_ids != self.pad_token_id).sum()
         recon_loss = recon_loss / num_valid_tokens.clamp(min=1.0)
 
-        # KL loss (per position, then averaged)
-        kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+        # Free Bits KL loss: ensure minimum information per dimension
+        # This prevents posterior collapse by guaranteeing each dimension carries at least `free_bits` nats
+        free_bits = 0.5  # Minimum nats per dimension (increase to 1.0-2.0 if still collapsing)
+        kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())  # [batch, seq, dim]
+        kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)  # Apply free bits floor
+        kl_loss = kl_per_dim.mean()
 
         total_loss = recon_loss + kl_weight * kl_loss
 
