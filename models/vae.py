@@ -405,10 +405,13 @@ class SequenceVAE(nn.Module):
         self.pad_token_id = pad_token_id
 
         # Embeddings
+        # IMPORTANT: Create our own embedding layer and COPY weights, don't share reference
+        # Sharing reference causes dtype mismatch with AMP (bfloat16 vs float32)
+        # because the pretrained embeddings belong to the frozen condition encoder
+        self.embeddings = nn.Embedding(vocab_size, embedding_dim)
         if pretrained_embeddings is not None:
-            self.embeddings = pretrained_embeddings
-        else:
-            self.embeddings = nn.Embedding(vocab_size, embedding_dim)
+            with torch.no_grad():
+                self.embeddings.weight.copy_(pretrained_embeddings.weight)
 
         # Encoder: embedding_dim -> latent_dim
         encoder_layer = nn.TransformerEncoderLayer(

@@ -90,5 +90,5 @@ dmypy.json
 .env.local
 
 
-*.txt
+# *.txt
 *.csv
