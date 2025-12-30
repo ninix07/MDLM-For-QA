@@ -317,12 +317,15 @@ def debug_dimensions(model, batch, device, epoch_num):
         embeddings = model.vae.embeddings(answer_ids)
         
         # Get VAE latent
-        z, mean, logvar = model.vae.encode(answer_ids, answer_mask)
+        if hasattr(model.vae, "latent_seq_len"): # SequenceVAE
+            z, mean, logvar, l_mask = model.vae.encode(answer_ids, answer_mask)
+        else: # EmbeddingBridge
+            z = model.vae.encode(answer_ids)
         
         print(f"\n[DEBUG Epoch {epoch_num}] Dimension Verification:")
         print(f"    Sample Answer: '{answer_text[:50]}...' " if len(answer_text) > 50 else f"    Sample Answer: '{answer_text}'")
         print(f"    BERT Embeddings: {embeddings.shape} (expected: [1, seq, 768])")
-        print(f"    VAE Latent (z):  {z.shape} (expected: [1, seq, 128])")
+        print(f"    VAE Latent (z):  {z.shape} (expected: [1, 8, 128] for VAE or [1, seq, 768] for Bridge)")
         print(f"    Transformation: {embeddings.shape[-1]} → {z.shape[-1]} ✓" if z.shape[-1] == 128 else f"    ❌ ERROR: Expected 128, got {z.shape[-1]}")
     model.train()
 

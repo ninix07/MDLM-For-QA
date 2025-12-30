@@ -138,8 +138,9 @@ class LatentDiffusionQA(nn.Module):
             null_ids = torch.tensor([[self.null_ans_token_id]], device=device)
             if self.use_vae:
                 with torch.no_grad():
-                    null_emb = self.vae.get_latent(null_ids, use_mean=True)
+                    null_emb, _ = self.vae.get_latent(null_ids, use_mean=True)
             else:
+                # EmbeddingBridge.encode returns 3D tensor directly
                 null_emb = self.vae.encode(null_ids)
             self._null_ans_embedding = null_emb.squeeze(0)
         return self._null_ans_embedding
