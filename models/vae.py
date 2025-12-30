@@ -411,7 +411,11 @@ class SequenceVAE(nn.Module):
         self.embeddings = nn.Embedding(vocab_size, embedding_dim)
         if pretrained_embeddings is not None:
             with torch.no_grad():
-                self.embeddings.weight.copy_(pretrained_embeddings.weight)
+                # Handle vocab size mismatch (e.g., when special tokens like <NULL_ANS> are added)
+                pretrained_vocab_size = pretrained_embeddings.weight.shape[0]
+                copy_size = min(vocab_size, pretrained_vocab_size)
+                self.embeddings.weight[:copy_size].copy_(pretrained_embeddings.weight[:copy_size])
+                # Any new tokens (e.g., <NULL_ANS>) keep their random initialization
 
         # Encoder: embedding_dim -> latent_dim
         encoder_layer = nn.TransformerEncoderLayer(
