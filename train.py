@@ -348,7 +348,7 @@ def train_step(
         optimizer.zero_grad(set_to_none=True)
 
     if use_amp and grad_scaler is not None:
-        with autocast(device_type=device.type, dtype=torch.bfloat16):
+        with autocast(device_type=device.type, dtype=torch.float16):
             outputs = model(
                 context_ids,
                 context_mask,
@@ -756,11 +756,8 @@ def main():
     
     # Check bfloat16 support if using AMP
     if use_amp:
-        if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 8:  # Ampere+ GPUs
-            print("✅ GPU supports bfloat16 - using stable mixed precision")
-        else:
-            print("⚠️  GPU doesn't support bfloat16, falling back to FP16 AMP")
-            print("    If you encounter CUDA errors, disable AMP in config")
+        print("⚠️  Forcing FP16 AMP to bypass cuBLAS dimension errors")
+        print("    Using standard float16 for maximum compatibility")
 
     # Resume from checkpoint
     start_epoch = 0
