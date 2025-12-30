@@ -398,10 +398,11 @@ def train_step(
     }
 
     # Log vital signs and token accuracy periodically (every log_every steps)
-    # We use global_step % log_every == 0 to ensure uniform logging cadence
-    log_every = 100 # Standardizing based on config.training.log_every
+    log_every = 100 
     
-    if global_step % log_every == 0 and (step_idx + 1) % accumulation_steps == 0:
+    if global_step % log_every == 0:
+        # During warmup, step_idx + 1 might not align with accumulation, 
+        # but we want vital signs anyway to monitor health.
         log_vital_signs(model, batch, vae_output, diffusion_output, global_step, epoch)
         
         # Log token accuracy if VAE is active
