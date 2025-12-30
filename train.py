@@ -348,7 +348,7 @@ def train_step(
         optimizer.zero_grad(set_to_none=True)
 
     if use_amp and grad_scaler is not None:
-        with autocast(device_type=device.type, dtype=torch.float16):
+        with autocast(device_type=device.type, dtype=torch.bfloat16):
             outputs = model(
                 context_ids,
                 context_mask,
@@ -621,10 +621,10 @@ def load_checkpoint(model, optimizer, scheduler, path, device):
 
 def main():
     # Disable TF32 for more stable AMP training
-    # torch.backends.cuda.matmul.allow_tf32 = False
-    # torch.backends.cudnn.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    # torch.backends.cuda.matmul.allow_tf32 = True
+    # torch.backends.cudnn.allow_tf32 = True
     # Disable nested tensors for transformer layers to avoid prototype bugs
     torch._C._jit_set_texpr_fuser_enabled(False)
     
@@ -754,10 +754,6 @@ def main():
     use_amp = config.training.use_amp and device.type == "cuda"
     grad_scaler = GradScaler(amp_device) if use_amp else None
     
-    # Check bfloat16 support if using AMP
-    if use_amp:
-        print("⚠️  Forcing FP16 AMP to bypass cuBLAS dimension errors")
-        print("    Using standard float16 for maximum compatibility")
 
     # Resume from checkpoint
     start_epoch = 0
