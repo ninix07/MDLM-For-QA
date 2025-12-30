@@ -572,7 +572,7 @@ class SequenceVAE(nn.Module):
 
         # Free Bits KL loss: ensure minimum information per dimension
         # This prevents posterior collapse by guaranteeing each dimension carries at least `free_bits` nats
-        free_bits = 0.5  # Minimum nats per dimension (increase to 1.0-2.0 if still collapsing)
+        free_bits = 1.0  # Increased to 1.0 for stronger collapse protection
         kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())  # [batch, seq, dim]
         kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)  # Apply free bits floor
         kl_loss = kl_per_dim.mean()

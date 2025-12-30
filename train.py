@@ -383,10 +383,10 @@ def train_step(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-    # Extract VAE and diffusion outputs for monitoring
+    # Extract VAE and diffusion outputs for monitoring accurately
     vae_output = {
-        "recon_loss": outputs.get("vae_recon_loss", torch.tensor(0.0)),
-        "kl_loss": outputs.get("vae_kl_loss", torch.tensor(0.0)),
+        "recon_loss": outputs.get("recon_loss", torch.tensor(0.0)),
+        "kl_loss": outputs.get("kl_loss", torch.tensor(0.0)),
         "z": outputs.get("z", None),
         "mean": outputs.get("mean", None),
         "logvar": outputs.get("logvar", None),
@@ -397,12 +397,15 @@ def train_step(
         "pred_noise": outputs.get("pred_noise", None),
     }
 
-    # Log vital signs (only at accumulation boundaries to avoid spam)
-    if (step_idx + 1) % accumulation_steps == 0:
+    # Log vital signs and token accuracy periodically (every log_every steps)
+    # We use global_step % log_every == 0 to ensure uniform logging cadence
+    log_every = 100 # Standardizing based on config.training.log_every
+    
+    if global_step % log_every == 0 and (step_idx + 1) % accumulation_steps == 0:
         log_vital_signs(model, batch, vae_output, diffusion_output, global_step, epoch)
         
-        # Log token accuracy every 50 steps
-        if global_step % 50 == 0 and vae_output["z"] is not None:
+        # Log token accuracy if VAE is active
+        if vae_output["z"] is not None:
             log_token_accuracy(model, batch, vae_output, global_step)
 
     # Compute latent stats if available
@@ -838,15 +841,18 @@ def main():
                 # If we use the same global_step, it might be confusing if we resume?
                 # Let's just log 'warmup/step' for now to be safe and explicit.
                 
-                wandb.log(
-                    {
-                        "warmup/vae_loss": metrics["vae_loss"],
-                        "warmup/kl_weight": current_kl,
-                        "warmup/lr": scheduler.get_last_lr()[0],
-                        "warmup/epoch": epoch,
-                        "warmup/step": batch_idx + epoch * len(train_loader),
-                    }
-                )
+                # Log warmup metrics every log_every steps to avoid console spam
+                log_every = 100
+                if current_step % log_every == 0:
+                    wandb.log(
+                        {
+                            "warmup/vae_loss": metrics["vae_loss"],
+                            "warmup/kl_weight": current_kl,
+                            "warmup/lr": scheduler.get_last_lr()[0],
+                            "warmup/epoch": epoch,
+                            "warmup/step": current_step,
+                        }
+                    )
             
             avg_vae_loss = epoch_vae_loss / len(train_loader)
             
