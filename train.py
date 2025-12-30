@@ -56,6 +56,257 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def get_grad_norm(model: nn.Module) -> float:
+    """Calculate L2 norm of all gradients combined."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
+
+
+def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch: int):
+    """
+    Log comprehensive vital signs for VAE-Diffusion system health monitoring.
+    
+    Args:
+        model: The LatentDiffusionQA model
+        batch: Training batch with inputs and targets
+        vae_output: Output from VAE forward pass
+        diffusion_output: Output from diffusion forward pass
+        step: Current training step
+        epoch: Current epoch number
+    """
+    device = next(model.parameters()).device
+    
+    # 1. VAE Heartbeat Metrics
+    answer_ids = batch["answer_input_ids"].to(device)
+    valid_tokens = (answer_ids != model.pad_token_id).sum()
+    total_tokens = answer_ids.numel()
+    
+    # Properly normalized reconstruction loss (per valid token)
+    recon_loss_per_valid = vae_output["recon_loss"].item()
+    
+    # KL divergence metrics
+    kl_loss = vae_output.get("kl_loss", torch.tensor(0.0)).item()
+    
+    # Active latent dimensions (where variance > 0.1)
+    z = vae_output.get("z", None)
+    if z is not None:
+        latent_variance = z.var(dim=0)  # Variance per dimension
+        active_dims = (latent_variance > 0.1).sum().item()
+        latent_mean = z.mean().item()
+        latent_std = z.std().item()
+    else:
+        active_dims = 0
+        latent_mean = 0.0
+        latent_std = 0.0
+    
+    # 2. Latent Distribution Health
+    if model.scaler is not None and z is not None:
+        # Get scaled latents (what diffusion model sees)
+        z_scaled = model.scaler.transform(z)
+        scaled_mean = z_scaled.mean().item()
+        scaled_std = z_scaled.std().item()
+    else:
+        scaled_mean = latent_mean
+        scaled_std = latent_std
+    
+    # 3. Diffusion Dynamics
+    diff_loss = diffusion_output.get("loss", torch.tensor(0.0)).item()
+    
+    # Prediction magnitude (norm of model output)
+    pred_noise = diffusion_output.get("pred_noise", None)
+    if pred_noise is not None:
+        pred_magnitude = pred_noise.norm().item()
+    else:
+        pred_magnitude = 0.0
+    
+    # 4. Task-Specific Metrics (Null Prediction Health)
+    # Calculate null prediction rate (expensive, so sample)
+    if step % 100 == 0:  # Every 100 steps to save compute
+        with torch.no_grad():
+            # Quick inference on a small sample
+            sample_size = min(4, len(batch["answer_input_ids"]))
+            sample_answer_ids = batch["answer_input_ids"][:sample_size].to(device)
+            sample_answer_mask = batch["answer_attention_mask"][:sample_size].to(device)
+            sample_context_ids = batch["context_input_ids"][:sample_size].to(device)
+            sample_context_mask = batch["context_attention_mask"][:sample_size].to(device)
+            sample_question_ids = batch["question_input_ids"][:sample_size].to(device)
+            sample_question_mask = batch["question_attention_mask"][:sample_size].to(device)
+            
+            try:
+                sample_outputs = model(
+                    sample_context_ids, sample_context_mask,
+                    sample_question_ids, sample_question_mask,
+                    sample_answer_ids, sample_answer_mask,
+                    kl_weight=0.01
+                )
+                
+                # Null prediction rate
+                null_logits = sample_outputs.get("null_logits", None)
+                if null_logits is not None:
+                    null_preds = (null_logits > model.null_threshold).float()
+                    null_prediction_rate = null_preds.mean().item()
+                else:
+                    null_prediction_rate = 0.0
+                
+                # Null cosine similarity
+                null_similarity = sample_outputs.get("null_similarity", None)
+                if null_similarity is not None:
+                    avg_null_sim = null_similarity.mean().item()
+                else:
+                    avg_null_sim = 0.0
+                    
+            except Exception as e:
+                # Fallback if inference fails
+                null_prediction_rate = 0.0
+                avg_null_sim = 0.0
+    else:
+        null_prediction_rate = None
+        avg_null_sim = None
+    
+    # 5. Gradient Health
+    grad_norm = get_grad_norm(model)
+    
+    # Compile vital signs log
+    vital_logs = {
+        # VAE Heartbeat
+        "vital/vae_recon_per_valid": recon_loss_per_valid,
+        "vital/vae_kl_divergence": kl_loss,
+        "vital/vae_active_latent_dims": active_dims,
+        
+        # Latent Distribution
+        "vital/latent_mean": latent_mean,
+        "vital/latent_std": latent_std,
+        "vital/scaled_mean": scaled_mean,
+        "vital/scaled_std": scaled_std,
+        
+        # Diffusion Dynamics
+        "vital/diff_mse_loss": diff_loss,
+        "vital/diff_pred_magnitude": pred_magnitude,
+        
+        # Gradient Health
+        "vital/grad_norm": grad_norm,
+        
+        # Basic stats
+        "vital/valid_tokens": valid_tokens.item(),
+        "vital/total_tokens": total_tokens,
+        "vital/valid_token_ratio": valid_tokens.float() / total_tokens,
+    }
+    
+    # Add task-specific metrics if available
+    if null_prediction_rate is not None:
+        vital_logs["vital/null_prediction_rate"] = null_prediction_rate
+    if avg_null_sim is not None:
+        vital_logs["vital/null_cosine_sim"] = avg_null_sim
+    
+    # Log to wandb
+    wandb.log(vital_logs, step=step)
+    
+    # Check for kill signals and print warnings
+    check_kill_signals(vital_logs, step, epoch)
+
+
+def check_kill_signals(logs: dict, step: int, epoch: int):
+    """
+    Check for critical failure patterns and print warnings.
+    """
+    warnings = []
+    
+    # VAE Health Checks
+    if logs["vital/vae_recon_per_valid"] > 6.0 and epoch > 0:
+        warnings.append(f"🚨 HIGH RECON LOSS: {logs['vital/vae_recon_per_valid']:.2f} > 6.0 (VAE not learning)")
+    
+    if logs["vital/vae_kl_divergence"] < 0.001:
+        warnings.append(f"🚨 POSTERIOR COLLAPSE: KL {logs['vital/vae_kl_divergence']:.4f} < 0.001")
+    elif logs["vital/vae_kl_divergence"] > 100.0:
+        warnings.append(f"🚨 KL EXPLOSION: KL {logs['vital/vae_kl_divergence']:.2f} > 100.0")
+    
+    if logs["vital/vae_active_latent_dims"] < 10:
+        warnings.append(f"🚨 FEW ACTIVE DIMS: {logs['vital/vae_active_latent_dims']} < 10 (wasted capacity)")
+    
+    # Latent Distribution Checks
+    if abs(logs["vital/scaled_mean"]) > 0.5:
+        warnings.append(f"🚨 CENTERING ISSUE: Scaled mean {logs['vital/scaled_mean']:.3f} > 0.5")
+    
+    if logs["vital/scaled_std"] > 1.5 or logs["vital/scaled_std"] < 0.5:
+        warnings.append(f"🚨 SCALING ISSUE: Scaled std {logs['vital/scaled_std']:.3f} not in [0.5, 1.5]")
+    
+    # Gradient Health Checks
+    if logs["vital/grad_norm"] > 10.0:
+        warnings.append(f"🚨 GRADIENT EXPLOSION: Norm {logs['vital/grad_norm']:.2f} > 10.0")
+    elif logs["vital/grad_norm"] < 1e-4:
+        warnings.append(f"🚨 VANISHING GRADIENTS: Norm {logs['vital/grad_norm']:.6f} < 1e-4")
+    
+    # Task-Specific Checks
+    if "vital/null_prediction_rate" in logs:
+        if logs["vital/null_prediction_rate"] > 0.95:
+            warnings.append(f"🚨 NULL BIAS: {logs['vital/null_prediction_rate']:.1%} > 95% saying 'no answer'")
+        elif logs["vital/null_prediction_rate"] < 0.05 and epoch > 0:
+            warnings.append(f"🚨 IGNORING NULL: {logs['vital/null_prediction_rate']:.1%} < 5% unanswerable predictions")
+    
+    # Print warnings if any
+    if warnings:
+        print(f"\n⚠️  VITAL SIGNS WARNING (Step {step}, Epoch {epoch}):")
+        for warning in warnings:
+            print(f"   {warning}")
+        print("   Consider stopping the run to investigate!")
+
+
+def log_token_accuracy(model, batch, vae_output, step: int):
+    """
+    Log detailed token-level accuracy metrics.
+    """
+    device = next(model.parameters()).device
+    
+    # Get predictions and targets
+    answer_ids = batch["answer_input_ids"].to(device)
+    attention_mask = batch["answer_attention_mask"].to(device)
+    
+    # Get VAE reconstruction
+    z = vae_output["z"]
+    decoded = model.vae.decode(z)
+    embed_weight = model.vae.embeddings.weight
+    logits = torch.matmul(decoded, embed_weight.T)
+    pred_ids = logits.argmax(dim=-1)
+    
+    # Calculate token-level accuracy (only on non-padding tokens)
+    valid_mask = attention_mask.bool()
+    correct_tokens = (pred_ids == answer_ids) & valid_mask
+    token_accuracy = correct_tokens.sum().float() / valid_mask.sum().float()
+    
+    # Exact match accuracy (entire sequence)
+    exact_match = ((pred_ids == answer_ids) | ~valid_mask).all(dim=1).float().mean()
+    
+    # Character-level accuracy
+    pred_texts = [model.tokenizer.decode(p, skip_special_tokens=True) for p in pred_ids]
+    target_texts = [model.tokenizer.decode(t, skip_special_tokens=True) for t in answer_ids]
+    
+    char_accuracies = []
+    for pred, target in zip(pred_texts, target_texts):
+        if target.strip():
+            pred_chars = set(pred.lower())
+            target_chars = set(target.lower())
+            if target_chars:
+                char_acc = len(pred_chars & target_chars) / len(target_chars)
+                char_accuracies.append(char_acc)
+    
+    avg_char_accuracy = sum(char_accuracies) / len(char_accuracies) if char_accuracies else 0.0
+    
+    # Log token accuracy metrics
+    token_logs = {
+        "accuracy/token_accuracy": token_accuracy.item(),
+        "accuracy/exact_match": exact_match.item(),
+        "accuracy/char_accuracy": avg_char_accuracy,
+    }
+    
+    wandb.log(token_logs, step=step)
+    
+    return token_accuracy.item(), exact_match.item(), avg_char_accuracy
+
+
 def debug_dimensions(model, batch, device, epoch_num):
     """Debug function to verify VAE 768→256 transformation at epoch start."""
     model.eval()
@@ -82,9 +333,9 @@ def debug_dimensions(model, batch, device, epoch_num):
 
 
 def train_step(
-    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.01
+    model, batch, optimizer, grad_scaler, device, use_amp, accumulation_steps=1, step_idx=0, train_vae_only=False, kl_weight=0.01, global_step=0, epoch=0
 ):
-    """Single training step with gradient accumulation support."""
+    """Single training step with gradient accumulation support and vital signs monitoring."""
     context_ids = batch["context_input_ids"].to(device)
     context_mask = batch["context_attention_mask"].to(device)
     question_ids = batch["question_input_ids"].to(device)
@@ -136,6 +387,28 @@ def train_step(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
+    # Extract VAE and diffusion outputs for monitoring
+    vae_output = {
+        "recon_loss": outputs.get("vae_recon_loss", torch.tensor(0.0)),
+        "kl_loss": outputs.get("vae_kl_loss", torch.tensor(0.0)),
+        "z": outputs.get("z", None),
+        "mean": outputs.get("mean", None),
+        "logvar": outputs.get("logvar", None),
+    }
+    
+    diffusion_output = {
+        "loss": outputs.get("diffusion_loss", torch.tensor(0.0)),
+        "pred_noise": outputs.get("pred_noise", None),
+    }
+
+    # Log vital signs (only at accumulation boundaries to avoid spam)
+    if (step_idx + 1) % accumulation_steps == 0:
+        log_vital_signs(model, batch, vae_output, diffusion_output, global_step, epoch)
+        
+        # Log token accuracy every 50 steps
+        if global_step % 50 == 0 and vae_output["z"] is not None:
+            log_token_accuracy(model, batch, vae_output, global_step)
+
     # Compute latent stats if available
     mean_norm = 0.0
     std_mean = 0.0
@@ -159,9 +432,9 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.01):
+def validate(model, val_loader, device, train_vae_only=False, max_metric_batches=20, kl_weight=0.01, global_step=0, epoch=0):
     """
-    Validation loop with F1 and EM metrics.
+    Validation loop with F1 and EM metrics and vital signs monitoring.
     
     Args:
         max_metric_batches: Number of batches to compute expensive generation metrics for.
@@ -179,7 +452,7 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     import random
     debug_batch_idx = random.randint(1, max_metric_batches)
 
-    for batch in tqdm(val_loader, desc="Validating"):
+    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validating")):
         context_ids = batch["context_input_ids"].to(device)
         context_mask = batch["context_attention_mask"].to(device)
         question_ids = batch["question_input_ids"].to(device)
@@ -199,6 +472,28 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
             kl_weight=kl_weight,
         )
         total_loss += outputs["loss"].item()
+        
+        # Extract VAE and diffusion outputs for monitoring
+        vae_output = {
+            "recon_loss": outputs.get("vae_recon_loss", torch.tensor(0.0)),
+            "kl_loss": outputs.get("vae_kl_loss", torch.tensor(0.0)),
+            "z": outputs.get("z", None),
+            "mean": outputs.get("mean", None),
+            "logvar": outputs.get("logvar", None),
+        }
+        
+        diffusion_output = {
+            "loss": outputs.get("diffusion_loss", torch.tensor(0.0)),
+            "pred_noise": outputs.get("pred_noise", None),
+        }
+
+        # Log vital signs for validation (sample every 10 batches to avoid spam)
+        if batch_idx % 10 == 0:
+            log_vital_signs(model, batch, vae_output, diffusion_output, global_step + batch_idx, epoch)
+            
+            # Log token accuracy every 50 validation steps
+            if batch_idx % 50 == 0 and vae_output["z"] is not None:
+                log_token_accuracy(model, batch, vae_output, global_step + batch_idx)
         if "recon_loss" in outputs:
             total_recon_loss += outputs["recon_loss"].item()
             total_kl_loss += outputs["kl_loss"].item()
@@ -514,6 +809,8 @@ def main():
                     step_idx=batch_idx,
                     train_vae_only=True,
                     kl_weight=current_kl,
+                    global_step=current_step,
+                    epoch=epoch,
                 )
                 
                 # Only step scheduler after full accumulation
@@ -549,7 +846,7 @@ def main():
             avg_vae_loss = epoch_vae_loss / len(train_loader)
             
             # Validate VAE
-            val_metrics = validate(model, val_loader, device, train_vae_only=True, max_metric_batches=20)
+            val_metrics = validate(model, val_loader, device, train_vae_only=True, max_metric_batches=20, global_step=current_step, epoch=epoch)
             val_vae_loss = val_metrics["loss"]
             val_f1 = val_metrics["f1"]
             val_em = val_metrics["em"]
@@ -652,6 +949,7 @@ def main():
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for batch_idx, batch in enumerate(pbar):
+            current_step = epoch * len(train_loader) + batch_idx
             metrics = train_step(
                 model,
                 batch,
@@ -662,6 +960,8 @@ def main():
                 accumulation_steps=accumulation_steps,
                 step_idx=batch_idx,
                 train_vae_only=False,
+                global_step=current_step,
+                epoch=epoch,
             )
             # Only step scheduler after full accumulation
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -701,7 +1001,7 @@ def main():
                 )
 
         avg_train_loss = epoch_loss / len(train_loader)
-        val_metrics = validate(model, val_loader, device, max_metric_batches=20)
+        val_metrics = validate(model, val_loader, device, max_metric_batches=20, global_step=global_step, epoch=epoch)
         val_loss = val_metrics["loss"]
         val_f1 = val_metrics["f1"]
         val_em = val_metrics["em"]
