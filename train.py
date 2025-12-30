@@ -23,7 +23,7 @@ from models import LatentDiffusionQA
 from models.scaler import LatentScaler
 from models.scaler import LatentScaler
 from metrics import compute_metrics
-
+from typing import Optional
 
 def get_kl_weight(current_step: int, total_steps: int, target_kl: float = 0.01, cycles: int = 4) -> float:
     """
