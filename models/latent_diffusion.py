@@ -102,7 +102,7 @@ class LatentDiffusionQA(nn.Module):
                 embedding_dim=embedding_dim,  # Use actual BERT dim (768), not d_model
                 latent_dim=latent_dim,
                 num_layers=4,
-                num_heads=8,
+                num_heads=12,
                 dropout=dropout,
                 pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
                 pad_token_id=self.pad_token_id,
