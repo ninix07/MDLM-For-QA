@@ -53,7 +53,6 @@ class LatentDiffusionQA(nn.Module):
         self.latent_dim = latent_dim
         self.max_answer_len = max_answer_len
         self.null_ans_token = null_ans_token
-        self.null_ans_token = null_ans_token
         self.use_vae = use_vae
         self.false_negative_penalty_weight = false_negative_penalty_weight
         self.scaler = scaler
@@ -80,7 +79,7 @@ class LatentDiffusionQA(nn.Module):
             num_heads=num_heads,
             ff_dim=ff_dim,
             dropout=dropout,
-            max_seq_len=max_answer_len,
+            max_seq_len=8,  # Matches VAE's latent_seq_len
             condition_encoder=base_encoder,
         )
 
@@ -106,6 +105,7 @@ class LatentDiffusionQA(nn.Module):
                 dropout=dropout,
                 pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
                 pad_token_id=self.pad_token_id,
+                latent_seq_len=8,  # Structural Bottleneck
             )
         else:
             self.vae = EmbeddingBridge(model_name=base_encoder)
@@ -144,16 +144,12 @@ class LatentDiffusionQA(nn.Module):
             self._null_ans_embedding = null_emb.squeeze(0)
         return self._null_ans_embedding
 
-    def encode_answer(
-        self,
-        answer_ids: torch.Tensor,
-        answer_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def encode_answer(self, answer_ids: torch.Tensor, answer_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Encode answer tokens to latent space."""
         if self.use_vae:
             return self.vae.get_latent(answer_ids, answer_mask, use_mean=True)
         else:
-            return self.vae.encode(answer_ids)
+            return self.vae.encode(answer_ids), answer_mask
 
     def decode_latent(
         self,
@@ -180,7 +176,7 @@ class LatentDiffusionQA(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Reconstruct answers using only the VAE."""
         # Encode to latent
-        z = self.encode_answer(answer_ids, answer_mask)
+        z, _ = self.encode_answer(answer_ids, answer_mask)
         
         # Decode latent to tokens
         tokens = self.decode_latent(z, return_tokens=True)
@@ -214,30 +210,39 @@ class LatentDiffusionQA(nn.Module):
             - vae_loss: VAE reconstruction + KL loss (if using VAE)
         """
         vae_loss = torch.tensor(0.0, device=answer_ids.device)
-        if train_vae_only:
+        recon_loss = torch.tensor(0.0, device=answer_ids.device)
+        kl_loss = torch.tensor(0.0, device=answer_ids.device)
+        vae_output = {}
+
+        if self.use_vae:
             vae_output = self.vae.loss(answer_ids, answer_mask, kl_weight=kl_weight)
             vae_loss = vae_output["loss"]
-            ret = {
-                "loss": vae_loss,
-                "diffusion_loss": torch.tensor(0.0, device=answer_ids.device),
-                "vae_loss": vae_loss,
-                "penalty": torch.tensor(0.0, device=answer_ids.device),
-            }
-            if "mean" in vae_output:
-                ret["mean"] = vae_output["mean"]
-                ret["logvar"] = vae_output["logvar"]
-            if "recon_loss" in vae_output:
-                ret["recon_loss"] = vae_output["recon_loss"]
-                ret["kl_loss"] = vae_output["kl_loss"]
-            return ret
+            recon_loss = vae_output.get("recon_loss", torch.tensor(0.0, device=answer_ids.device))
+            kl_loss = vae_output.get("kl_loss", torch.tensor(0.0, device=answer_ids.device))
+            
+            if train_vae_only:
+                ret = {
+                    "loss": vae_loss,
+                    "diffusion_loss": torch.tensor(0.0, device=answer_ids.device),
+                    "vae_loss": vae_loss,
+                    "recon_loss": recon_loss,
+                    "kl_loss": kl_loss,
+                    "penalty": torch.tensor(0.0, device=answer_ids.device),
+                }
+                if "mean" in vae_output:
+                    ret["mean"] = vae_output["mean"]
+                    ret["logvar"] = vae_output["logvar"]
+                if "z" in vae_output:
+                    ret["z"] = vae_output["z"]
+                return ret
 
         # Encode answer to latent
-        z_0 = self.encode_answer(answer_ids, answer_mask)
+        z_0, latent_mask = self.encode_answer(answer_ids, answer_mask)
 
         # Requirement 2: Latent Calibration
         # Normalize latent if scaler is provided
         if self.scaler is not None:
-            z_0 = self.scaler.transform(z_0, mask=answer_mask)
+            z_0 = self.scaler.transform(z_0, mask=latent_mask)
 
         # IMPLEMENT CONDITIONING DROPOUT
         # This is required for CFG to work at inference
@@ -316,7 +321,7 @@ class LatentDiffusionQA(nn.Module):
             self.denoiser, 
             z_0, 
             condition_kwargs, 
-            mask=answer_mask,
+            mask=latent_mask,
         )
         diffusion_loss = diff_output["loss"]
         
@@ -384,12 +389,22 @@ class LatentDiffusionQA(nn.Module):
         else:
             total_loss = diffusion_loss + (penalty_loss * 5.0)
         
-        return {
+        ret = {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
             "vae_loss": vae_loss,
+            "recon_loss": recon_loss,
+            "kl_loss": kl_loss,
             "penalty": penalty_loss
         }
+        
+        if "z" in vae_output:
+            ret["z"] = vae_output["z"]
+        if "mean" in vae_output:
+            ret["mean"] = vae_output["mean"]
+            ret["logvar"] = vae_output["logvar"]
+            
+        return ret
 
     @torch.no_grad()
     def generate(
@@ -416,7 +431,7 @@ class LatentDiffusionQA(nn.Module):
         device = context_ids.device
 
         # Sample from diffusion
-        shape = (batch_size, self.max_answer_len, self.latent_dim)
+        shape = (batch_size, 8, self.latent_dim)
         
         # Temporarily override num_inference_steps if provided
         original_steps = self.sampler.num_inference_steps
@@ -433,7 +448,7 @@ class LatentDiffusionQA(nn.Module):
             uncond_question_ids = torch.full_like(question_ids, self.pad_token_id)
             uncond_question_mask = torch.zeros_like(question_mask)
             uncond_question_mask[:, 0] = 1
-
+            
             z_0 = self.sampler.sample(
                 self.denoiser,
                 shape,

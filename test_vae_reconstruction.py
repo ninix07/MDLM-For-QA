@@ -47,6 +47,7 @@ def test_vae_reconstruction():
         num_heads=8,
         dropout=0.1,
         pad_token_id=tokenizer.pad_token_id,
+        latent_seq_len=8,  # Match new bottleneck architecture
     ).to(device)
     
     # Load trained weights

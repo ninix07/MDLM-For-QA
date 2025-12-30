@@ -37,12 +37,12 @@ class LatentScaler:
                 answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
                 answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
                 
-                # Get mean latent (deterministic)
-                z = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
+                # Get mean latent (deterministic) and the downsampled latent mask
+                z, latent_mask = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
                 
                 # Mask out padding and compute statistics online
-                mask = answer_mask.bool()
-                z_masked = z[mask]  # [valid_tokens, latent_dim]
+                mask = latent_mask.bool()
+                z_masked = z[mask]  # [valid_latents, latent_dim]
                 
                 # Online mean and variance calculation
                 batch_count = z_masked.shape[0]

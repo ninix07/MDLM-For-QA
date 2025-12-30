@@ -89,268 +89,6 @@ class EmbeddingBridge(nn.Module):
         return token_ids
 
 
-class TextVAE(nn.Module):
-    """
-    Approach B: Full Variational Autoencoder for text.
-
-    Encodes answer text into a smooth latent space using:
-    - Encoder: Transformer encoder that compresses sequence to latent
-    - Decoder: Transformer decoder that reconstructs sequence from latent
-
-    The VAE loss encourages a smooth, continuous latent space which
-    helps the diffusion process.
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        embedding_dim: int = 768,
-        latent_dim: int = 128,
-        hidden_dim: int = 512,
-        num_layers: int = 4,
-        num_heads: int = 8,
-        max_seq_len: int = 64,
-        dropout: float = 0.1,
-        pretrained_embeddings: Optional[nn.Embedding] = None,
-    ):
-        super().__init__()
-
-        self.vocab_size = vocab_size
-        self.embedding_dim = embedding_dim
-        self.latent_dim = latent_dim
-        self.max_seq_len = max_seq_len
-
-        # Embeddings
-        if pretrained_embeddings is not None:
-            self.embeddings = pretrained_embeddings
-            # Freeze pretrained embeddings
-            for param in self.embeddings.parameters():
-                param.requires_grad = False
-        else:
-            self.embeddings = nn.Embedding(vocab_size, embedding_dim)
-
-        # Positional encoding
-        self.pos_encoding = SinusoidalPositionalEncoding(embedding_dim, max_seq_len)
-
-        # Encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embedding_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
-
-        # Latent projection (sequence -> single latent vector)
-        self.to_latent_mean = nn.Linear(embedding_dim, latent_dim)
-        self.to_latent_logvar = nn.Linear(embedding_dim, latent_dim)
-
-        # Decoder
-        self.from_latent = nn.Linear(latent_dim, embedding_dim)
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=embedding_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-
-        # Output projection
-        self.output_proj = nn.Linear(embedding_dim, vocab_size)
-
-        # Learnable start token for decoder
-        self.start_token = nn.Parameter(torch.randn(1, 1, embedding_dim))
-
-    def encode(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Encode input sequence to latent distribution.
-
-        Args:
-            input_ids: [batch_size, seq_len]
-            attention_mask: [batch_size, seq_len]
-
-        Returns:
-            z: Sampled latent [batch_size, latent_dim]
-            mean: Mean of latent distribution
-            logvar: Log variance of latent distribution
-        """
-        batch_size = input_ids.size(0)
-
-        # Get embeddings
-        x = self.embeddings(input_ids)  # [batch, seq, dim]
-        x = self.pos_encoding(x)
-
-        # Create attention mask for transformer
-        if attention_mask is not None:
-            # Convert to boolean mask (True = ignore)
-            src_key_padding_mask = ~attention_mask.bool()
-        else:
-            src_key_padding_mask = None
-
-        # Encode
-        encoded = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
-
-        # Pool to single vector (mean pooling over non-padded tokens)
-        if attention_mask is not None:
-            mask_expanded = attention_mask.unsqueeze(-1).float()
-            pooled = (encoded * mask_expanded).sum(dim=1) / mask_expanded.sum(
-                dim=1
-            ).clamp(min=1)
-        else:
-            pooled = encoded.mean(dim=1)
-
-        # Get latent distribution parameters
-        mean = self.to_latent_mean(pooled)
-        logvar = self.to_latent_logvar(pooled)
-        
-        # Clamp logvar to prevent instability
-        logvar = torch.clamp(logvar, -30, 20)
-
-        # Reparameterization trick
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mean + eps * std
-
-        return z, mean, logvar
-
-    def decode(
-        self,
-        z: torch.Tensor,
-        target_ids: Optional[torch.Tensor] = None,
-        max_len: Optional[int] = None,
-    ) -> torch.Tensor:
-        """
-        Decode latent vector to sequence.
-
-        Args:
-            z: Latent vector [batch_size, latent_dim]
-            target_ids: Target sequence for teacher forcing [batch_size, seq_len]
-            max_len: Maximum length for autoregressive generation
-
-        Returns:
-            logits: [batch_size, seq_len, vocab_size]
-        """
-        batch_size = z.size(0)
-        max_len = max_len or self.max_seq_len
-
-        # Project latent to embedding space
-        memory = self.from_latent(z).unsqueeze(1)  # [batch, 1, dim]
-
-        if target_ids is not None:
-            # Teacher forcing: use target sequence
-            target_emb = self.embeddings(target_ids)
-            target_emb = self.pos_encoding(target_emb)
-
-            # Causal mask
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                target_ids.size(1), device=z.device
-            )
-
-            # Decode
-            decoded = self.decoder(target_emb, memory, tgt_mask=tgt_mask)
-            logits = self.output_proj(decoded)
-
-        else:
-            # Autoregressive generation
-            generated = self.start_token.expand(batch_size, -1, -1)
-
-            for _ in range(max_len - 1):
-                tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                    generated.size(1), device=z.device
-                )
-
-                decoded = self.decoder(generated, memory, tgt_mask=tgt_mask)
-                next_token_logits = self.output_proj(decoded[:, -1:, :])
-                next_token = next_token_logits.argmax(dim=-1)
-                next_emb = self.embeddings(next_token)
-                generated = torch.cat([generated, next_emb], dim=1)
-
-            logits = self.output_proj(self.decoder(generated, memory))
-
-        return logits
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass: encode and decode.
-
-        Returns dict with:
-            - logits: Reconstruction logits
-            - z: Sampled latent
-            - mean: Latent mean
-            - logvar: Latent log variance
-        """
-        z, mean, logvar = self.encode(input_ids, attention_mask)
-        logits = self.decode(z, target_ids=input_ids)
-
-        return {
-            "logits": logits,
-            "z": z,
-            "mean": mean,
-            "logvar": logvar,
-        }
-
-    def loss(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        kl_weight: float = 1.0,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Compute VAE loss: reconstruction + KL divergence.
-        """
-        outputs = self.forward(input_ids, attention_mask)
-
-        # Reconstruction loss (cross-entropy)
-        logits = outputs["logits"]
-        recon_loss = F.cross_entropy(
-            logits.view(-1, self.vocab_size),
-            input_ids.view(-1),
-            reduction="mean",
-            ignore_index=self.pad_token_id,
-        )
-
-        # KL divergence loss
-        mean = outputs["mean"]
-        logvar = outputs["logvar"]
-        kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-
-        # Total loss
-        total_loss = recon_loss + kl_weight * kl_loss
-
-        return {
-            "loss": total_loss,
-            "recon_loss": recon_loss,
-            "kl_loss": kl_loss,
-            "z": outputs["z"],
-            "mean": mean,
-            "logvar": logvar,
-        }
-
-    def get_latent(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        use_mean: bool = True,
-    ) -> torch.Tensor:
-        """
-        Get latent representation for diffusion.
-
-        Args:
-            use_mean: If True, return mean (deterministic). If False, sample.
-        """
-        z, mean, logvar = self.encode(input_ids, attention_mask)
-        return mean if use_mean else z
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -396,6 +134,7 @@ class SequenceVAE(nn.Module):
         dropout: float = 0.1,
         pretrained_embeddings: Optional[nn.Embedding] = None,
         pad_token_id: int = 0,
+        latent_seq_len: int = 8,
     ):
         super().__init__()
        
@@ -403,6 +142,7 @@ class SequenceVAE(nn.Module):
         self.embedding_dim = embedding_dim
         self.latent_dim = latent_dim
         self.pad_token_id = pad_token_id
+        self.latent_seq_len = latent_seq_len
 
         # Embeddings
         # IMPORTANT: Create our own embedding layer and COPY weights, don't share reference
@@ -453,14 +193,15 @@ class SequenceVAE(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Encode to sequence of latent vectors.
 
         Returns:
-            z: [batch, seq_len, latent_dim]
-            mean: [batch, seq_len, latent_dim]
-            logvar: [batch, seq_len, latent_dim]
+            z: [batch, latent_seq_len, latent_dim]
+            mean: [batch, latent_seq_len, latent_dim]
+            logvar: [batch, latent_seq_len, latent_dim]
+            latent_mask: [batch, latent_seq_len] or None
         """
         # Get embeddings
         x = self.embeddings(input_ids)
@@ -474,39 +215,62 @@ class SequenceVAE(nn.Module):
         encoded = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
 
         # Get latent distribution (per position)
-        mean = self.to_mean(encoded)
-        logvar = self.to_logvar(encoded)
+        # Apply structural bottleneck: average pool sequence across time
+        # [batch, 64, hidden] -> [batch, 8, hidden]
+        encoded_pooled = F.adaptive_avg_pool1d(encoded.transpose(1, 2), self.latent_seq_len).transpose(1, 2)
+        
+        # 2. Project to latent distribution
+        mean = self.to_mean(encoded_pooled)
+        logvar = self.to_logvar(encoded_pooled)
         
         # Clamp logvar to prevent instability
-        # [-10, 2] prevents near-zero variance (exp(-10) ≈ 0.00005) while allowing reasonable range
-        logvar = torch.clamp(logvar, -10, 2)
+        # Relaxed to [-5, 2] to force higher variance (std min 0.08)
+        logvar = torch.clamp(logvar, -5, 2)
 
         # Reparameterization
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mean + eps * std
 
+        # 3. Downsample mask if provided [batch, 64] -> [batch, 8]
+        # Use max pooling: if any token in the pool is NOT padding, the latent is valid.
+        latent_mask = None
+        if attention_mask is not None:
+            # attention_mask: 1 for valid, 0 for pad
+            # F.adaptive_max_pool1d expects B, C, L
+            latent_mask = F.adaptive_max_pool1d(attention_mask.unsqueeze(1).float(), self.latent_seq_len).squeeze(1)
+            # Threshold to keep it binary (max pool on float might be slightly > 0)
+            latent_mask = (latent_mask > 0.5).float()
+
         # Requirement 1: VAE Robustness & Local Isometry
         # Inject additional noise during training to bridge gap with diffusion
         if self.training:
-            noise_injection = torch.randn_like(z) * 0.1
+            # Increased noise to 0.2 to further break identity mapping
+            noise_injection = torch.randn_like(z) * 0.2
             z = z + noise_injection
 
-        return z, mean, logvar
+        return z, mean, logvar, latent_mask
 
-    def decode(self, z: torch.Tensor, return_hidden: bool = False) -> torch.Tensor:
+    def decode(self, z: torch.Tensor, target_len: int = 64) -> torch.Tensor:
         """
         Decode latent sequence to hidden states.
 
         Args:
-            z: [batch, seq_len, latent_dim]
-            return_hidden: If True, return hidden states instead of logits
+            z: [batch, latent_seq_len, latent_dim]
+            target_len: Target sequence length to expand to (default 64)
 
         Returns:
-            hidden: [batch, seq_len, embedding_dim]
+            hidden: [batch, target_len, embedding_dim]
         """
+        # 1. Project to embedding space [batch, 8, latent_dim] -> [batch, 8, embedding_dim]
         x = self.from_latent(z)
-        # Remove causal mask for non-autoregressive diffusion - allow bidirectional attention
+        
+        # 2. Expand sequence length [batch, 8, E] -> [batch, 64, E]
+        # This breaks the 1:1 token mapping
+        if x.shape[1] != target_len:
+            x = F.interpolate(x.transpose(1, 2), size=target_len, mode='linear', align_corners=False).transpose(1, 2)
+            
+        # 3. Decode with bidirectional attention
         decoded = self.decoder(x)
         # Apply output normalization to fix semantic mismatch
         decoded = self.output_norm(decoded)
@@ -517,7 +281,7 @@ class SequenceVAE(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        z, mean, logvar = self.encode(input_ids, attention_mask)
+        z, mean, logvar, latent_mask = self.encode(input_ids, attention_mask)
         logits = self.decode(z)
 
         return {
@@ -525,6 +289,7 @@ class SequenceVAE(nn.Module):
             "z": z,
             "mean": mean,
             "logvar": logvar,
+            "latent_mask": latent_mask,
         }
 
     def loss(
@@ -533,7 +298,7 @@ class SequenceVAE(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kl_weight: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
-        z, mean, logvar = self.encode(input_ids.contiguous(), attention_mask.contiguous())
+        z, mean, logvar, latent_mask = self.encode(input_ids.contiguous(), attention_mask.contiguous())
         decoded = self.decode(z)
 
         # Memory-efficient reconstruction loss using chunked computation
@@ -570,12 +335,9 @@ class SequenceVAE(nn.Module):
         num_valid_tokens = (input_ids != self.pad_token_id).sum()
         recon_loss = recon_loss / num_valid_tokens.clamp(min=1.0)
 
-        # Free Bits KL loss: ensure minimum information per dimension
-        # This prevents posterior collapse by guaranteeing each dimension carries at least `free_bits` nats
-        free_bits = 1.0  # Increased to 1.0 for stronger collapse protection
-        kl_per_dim = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())  # [batch, seq, dim]
-        kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)  # Apply free bits floor
-        kl_loss = kl_per_dim.mean()
+        # KL loss (per position, then averaged)
+        # REMOVED Free Bits clamp to see true KL collapse and force model to work harder
+        kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
 
         total_loss = recon_loss + kl_weight * kl_loss
 
@@ -593,7 +355,7 @@ class SequenceVAE(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         use_mean: bool = True,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get latent for diffusion (sequence-level)."""
-        z, mean, logvar = self.encode(input_ids, attention_mask)
-        return mean if use_mean else z
+        z, mean, logvar, latent_mask = self.encode(input_ids, attention_mask)
+        return (mean, latent_mask) if use_mean else (z, latent_mask)

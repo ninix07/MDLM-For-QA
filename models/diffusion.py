@@ -265,9 +265,6 @@ class GaussianDiffusion(nn.Module):
         else:
             loss = (F.mse_loss(model_output, target, reduction="none") * mse_weight).mean()
 
-        # Requirement 5: Min-SNR Weighted MSE Loss
-        # We will implement this in the next step, for now just standard MSE
-        # But we removed the penalty logic as per Requirement 3.
 
         return {
             "loss": loss,
