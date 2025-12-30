@@ -348,7 +348,7 @@ def train_step(
         optimizer.zero_grad(set_to_none=True)
 
     if use_amp and grad_scaler is not None:
-        with autocast(device_type=device.type):
+        with autocast(device_type=device.type, dtype=torch.bfloat16):
             outputs = model(
                 context_ids,
                 context_mask,
@@ -620,6 +620,13 @@ def load_checkpoint(model, optimizer, scheduler, path, device):
 
 
 def main():
+    # Disable TF32 for more stable AMP training
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    
+    # Disable nested tensors for transformer layers to avoid prototype bugs
+    torch._C._jit_set_texpr_fuser_enabled(False)
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, default="data/train-v2.0.json")
     parser.add_argument("--dev_file", type=str, default="data/dev-v2.0.json")
@@ -745,6 +752,14 @@ def main():
     # Only use AMP on CUDA
     use_amp = config.training.use_amp and device.type == "cuda"
     grad_scaler = GradScaler(amp_device) if use_amp else None
+    
+    # Check bfloat16 support if using AMP
+    if use_amp:
+        if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 8:  # Ampere+ GPUs
+            print("✅ GPU supports bfloat16 - using stable mixed precision")
+        else:
+            print("⚠️  GPU doesn't support bfloat16, falling back to FP16 AMP")
+            print("    If you encounter CUDA errors, disable AMP in config")
 
     # Resume from checkpoint
     start_epoch = 0

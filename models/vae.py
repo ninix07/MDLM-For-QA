@@ -140,7 +140,7 @@ class TextVAE(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
 
         # Latent projection (sequence -> single latent vector)
         self.to_latent_mean = nn.Linear(embedding_dim, latent_dim)
@@ -418,7 +418,7 @@ class SequenceVAE(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
 
         # Latent projections (per-position)
         self.to_mean = nn.Linear(embedding_dim, latent_dim)
@@ -525,7 +525,7 @@ class SequenceVAE(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kl_weight: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
-        z, mean, logvar = self.encode(input_ids, attention_mask)
+        z, mean, logvar = self.encode(input_ids.contiguous(), attention_mask.contiguous())
         decoded = self.decode(z)
 
         # Memory-efficient reconstruction loss using chunked computation
