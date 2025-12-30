@@ -4,7 +4,7 @@ from .embeddings import (
     SinusoidalPositionalEncoding,
 )
 from .transformer_blocks import ConditionalTransformerBlock, SelfAttentionBlock
-from .vae import EmbeddingBridge, TextVAE, SequenceVAE
+from .vae import EmbeddingBridge, SequenceVAE
 from .denoiser import ConditionalDenoiser
 from .diffusion import NoiseScheduler, GaussianDiffusion
 from .sampler import DDPMSampler, DDIMSampler, CachedDDIMSampler
@@ -17,7 +17,6 @@ __all__ = [
     "ConditionalTransformerBlock",
     "SelfAttentionBlock",
     "EmbeddingBridge",
-    "TextVAE",
     "SequenceVAE",
     "ConditionalDenoiser",
     "NoiseScheduler",
