@@ -298,6 +298,11 @@ def log_token_accuracy(model, batch, vae_output, step: int):
     avg_char_accuracy = sum(char_accuracies) / len(char_accuracies) if char_accuracies else 0.0
     
     # Log token accuracy metrics (no explicit step - let wandb auto-increment)
+    token_logs = {
+        "token/accuracy": token_accuracy.item(),
+        "token/exact_match": exact_match.item(),
+        "token/char_accuracy": avg_char_accuracy,
+    }
     wandb.log(token_logs)
     
     return token_accuracy.item(), exact_match.item(), avg_char_accuracy
