@@ -621,9 +621,10 @@ def load_checkpoint(model, optimizer, scheduler, path, device):
 
 def main():
     # Disable TF32 for more stable AMP training
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    
+    # torch.backends.cuda.matmul.allow_tf32 = False
+    # torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     # Disable nested tensors for transformer layers to avoid prototype bugs
     torch._C._jit_set_texpr_fuser_enabled(False)
     
