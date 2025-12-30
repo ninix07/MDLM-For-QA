@@ -68,7 +68,7 @@ def get_grad_norm(model: nn.Module) -> float:
     return total_norm ** 0.5
 
 
-def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch: int, grad_norm: Optional[float] = None):
+def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch: int, grad_norm: Optional[float] = None, log_to_wandb: bool = True):
     """
     Log comprehensive vital signs for VAE-Diffusion system health monitoring.
     
@@ -211,10 +211,13 @@ def log_vital_signs(model, batch, vae_output, diffusion_output, step: int, epoch
         vital_logs["vital/null_cosine_sim"] = avg_null_sim
     
     # Log to wandb (no explicit step - let wandb auto-increment to avoid step conflicts)
-    wandb.log(vital_logs)
+    if log_to_wandb:
+        wandb.log(vital_logs)
     
     # Check for kill signals and print warnings
     check_kill_signals(vital_logs, step, epoch)
+    
+    return vital_logs
 
 
 def check_kill_signals(logs: dict, step: int, epoch: int):
@@ -263,7 +266,7 @@ def check_kill_signals(logs: dict, step: int, epoch: int):
         print("   Consider stopping the run to investigate!")
 
 
-def log_token_accuracy(model, batch, vae_output, step: int):
+def log_token_accuracy(model, batch, vae_output, step: int, log_to_wandb: bool = True):
     """
     Log detailed token-level accuracy metrics.
     """
@@ -309,9 +312,10 @@ def log_token_accuracy(model, batch, vae_output, step: int):
         "token/exact_match": exact_match.item(),
         "token/char_accuracy": avg_char_accuracy,
     }
-    wandb.log(token_logs)
+    if log_to_wandb:
+        wandb.log(token_logs)
     
-    return token_accuracy.item(), exact_match.item(), avg_char_accuracy
+    return token_accuracy.item(), exact_match.item(), avg_char_accuracy, token_logs
 
 
 def debug_dimensions(model, batch, device, epoch_num):
@@ -474,6 +478,10 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     debug_sample = None
     import random
     debug_batch_idx = random.randint(1, max_metric_batches)
+    
+    # Accumulators for validation metrics
+    all_vital_logs = []
+    all_token_logs = []
 
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validating")):
         context_ids = batch["context_input_ids"].to(device)
@@ -512,11 +520,14 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
 
         # Log vital signs for validation (sample every 10 batches to avoid spam)
         if batch_idx % 10 == 0:
-            log_vital_signs(model, batch, vae_output, diffusion_output, global_step + batch_idx, epoch)
+            # Accumulate instead of logging directly to avoid broken graphs
+            v_logs = log_vital_signs(model, batch, vae_output, diffusion_output, global_step + batch_idx, epoch, log_to_wandb=False)
+            all_vital_logs.append(v_logs)
             
             # Log token accuracy every 50 validation steps
             if batch_idx % 50 == 0 and vae_output["z"] is not None:
-                log_token_accuracy(model, batch, vae_output, global_step + batch_idx)
+                _, _, _, t_logs = log_token_accuracy(model, batch, vae_output, global_step + batch_idx, log_to_wandb=False)
+                all_token_logs.append(t_logs)
         if "recon_loss" in outputs:
             total_recon_loss += outputs["recon_loss"].item()
             total_kl_loss += outputs["kl_loss"].item()
@@ -597,7 +608,28 @@ def validate(model, val_loader, device, train_vae_only=False, max_metric_batches
     if total_recon_loss > 0:
         metrics["recon_loss"] = total_recon_loss / max(num_batches, 1)
         metrics["kl_loss"] = total_kl_loss / max(num_batches, 1)
-    
+        
+    # Log aggregated vital signs and token metrics
+    if all_vital_logs:
+        avg_vital_logs = {}
+        # Aggregate vital logs
+        for key in all_vital_logs[0].keys():
+            # Filter for numeric values
+            values = [log[key] for log in all_vital_logs if key in log and isinstance(log[key], (int, float))]
+            if values:
+                # Prefix with val/ to distinguish from training logs
+                avg_vital_logs[f"val/{key}"] = sum(values) / len(values)
+        
+        # Aggregate token logs
+        if all_token_logs:
+            for key in all_token_logs[0].keys():
+                values = [log[key] for log in all_token_logs if key in log and isinstance(log[key], (int, float))]
+                if values:
+                    avg_vital_logs[f"val/{key}"] = sum(values) / len(values)
+        
+        # Add aggregated vital signs to return metrics
+        metrics.update(avg_vital_logs)
+
     # Memory management
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -904,7 +936,8 @@ def main():
                 "warmup/val_em": val_em,
                 "warmup/val_has_ans_f1": val_metrics.get("has_ans_f1", 0),
                 "warmup/val_no_ans_f1": val_metrics.get("no_ans_f1", 0),
-                "warmup/epoch": epoch
+                "warmup/epoch": epoch,
+                **{f"warmup/{k}": v for k, v in val_metrics.items() if k.startswith("val/")}
             })
             
             # Check for convergence/early stopping based on VALIDATION loss
@@ -1054,7 +1087,7 @@ def main():
         print(f"    NoAns:  F1 = {val_metrics['no_ans_f1']:.2f}, EM = {val_metrics['no_ans_em']:.2f} (Count: {val_metrics['total_no_ans']})")
         print(f"    Preds:  HasAns = {val_metrics['pred_has_ans']}, NoAns = {val_metrics['pred_no_ans']}")
 
-        wandb.log({
+        val_log_data = {
             "val/loss": val_loss, 
             "val/f1": val_f1,
             "val/em": val_em,
@@ -1065,7 +1098,13 @@ def main():
             "val/pred_has_ans": val_metrics["pred_has_ans"],
             "val/pred_no_ans": val_metrics["pred_no_ans"],
             "epoch": epoch
-        })
+        }
+        # Add aggregated vital signs
+        for k, v in val_metrics.items():
+            if k.startswith("val/"):
+                val_log_data[k] = v
+        
+        wandb.log(val_log_data)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
