@@ -824,8 +824,10 @@ def main():
             
             # Calculate total warmup steps
             total_warmup_steps = config.training.vae_warmup_epochs * len(train_loader)
+            current_step = global_step
             
             for batch_idx, batch in enumerate(pbar):
+                current_step = global_step
                 # Constant KL weight for "Wide & Loose" VAE
                 current_kl = 1e-5
                 
@@ -877,6 +879,8 @@ def main():
                             "warmup/step": current_step,
                         }
                     )
+
+                global_step += 1
             
             avg_vae_loss = epoch_vae_loss / len(train_loader)
             
