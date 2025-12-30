@@ -22,16 +22,18 @@ class NoiseScheduler:
         beta_start: float = 0.0001,
         beta_end: float = 0.02,
         cosine_s: float = 0.008,
+        device: Optional[torch.device] = None,
     ):
         self.num_timesteps = num_timesteps
         self.schedule_type = schedule_type
+        self.device = device
 
         if schedule_type == "linear":
-            betas = torch.linspace(beta_start, beta_end, num_timesteps)
+            betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
         elif schedule_type == "cosine":
-            betas = self._cosine_schedule(num_timesteps, cosine_s)
+            betas = self._cosine_schedule(num_timesteps, cosine_s, device)
         elif schedule_type == "sqrt":
-            betas = torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps) ** 2
+            betas = torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, device=device) ** 2
         else:
             raise ValueError(f"Unknown schedule type: {schedule_type}")
 
@@ -60,10 +62,10 @@ class NoiseScheduler:
             / (1.0 - self.alphas_cumprod)
         )
 
-    def _cosine_schedule(self, num_timesteps: int, s: float = 0.008) -> torch.Tensor:
+    def _cosine_schedule(self, num_timesteps: int, s: float = 0.008, device: Optional[torch.device] = None) -> torch.Tensor:
         """Cosine schedule as proposed in Improved DDPM."""
         steps = num_timesteps + 1
-        t = torch.linspace(0, num_timesteps, steps)
+        t = torch.linspace(0, num_timesteps, steps, device=device)
         alphas_cumprod = (
             torch.cos(((t / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
         )
@@ -72,23 +74,25 @@ class NoiseScheduler:
         return torch.clamp(betas, 0.0001, 0.9999)
 
     def to(self, device: torch.device):
-        """Move all tensors to device."""
-        self.betas = self.betas.to(device)
-        self.alphas = self.alphas.to(device)
-        self.alphas_cumprod = self.alphas_cumprod.to(device)
-        self.alphas_cumprod_prev = self.alphas_cumprod_prev.to(device)
-        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
-        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(
-            device
-        )
-        self.sqrt_recip_alphas_cumprod = self.sqrt_recip_alphas_cumprod.to(device)
-        self.sqrt_recipm1_alphas_cumprod = self.sqrt_recipm1_alphas_cumprod.to(device)
-        self.posterior_variance = self.posterior_variance.to(device)
-        self.posterior_log_variance_clipped = self.posterior_log_variance_clipped.to(
-            device
-        )
-        self.posterior_mean_coef1 = self.posterior_mean_coef1.to(device)
-        self.posterior_mean_coef2 = self.posterior_mean_coef2.to(device)
+        """Move all tensors to device - optimized batch operation."""
+        if self.device == device:
+            return self  # Already on correct device
+            
+        self.device = device
+        
+        # Batch move all tensors at once for efficiency
+        tensors = [
+            self.betas, self.alphas, self.alphas_cumprod, self.alphas_cumprod_prev,
+            self.sqrt_alphas_cumprod, self.sqrt_one_minus_alphas_cumprod,
+            self.sqrt_recip_alphas_cumprod, self.sqrt_recipm1_alphas_cumprod,
+            self.posterior_variance, self.posterior_log_variance_clipped,
+            self.posterior_mean_coef1, self.posterior_mean_coef2
+        ]
+        
+        # Move all tensors in a single operation
+        for tensor in tensors:
+            tensor.data = tensor.data.to(device)
+            
         return self
 
     def _extract(

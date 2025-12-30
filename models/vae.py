@@ -438,6 +438,9 @@ class SequenceVAE(nn.Module):
 
         # No separate output projection - use embedding weights (weight tying)
         # This saves ~200M parameters for XLM-R vocab
+        
+        # Add output normalization to fix semantic mismatch
+        self.output_norm = nn.LayerNorm(embedding_dim)
 
     def encode(
         self,
@@ -495,9 +498,10 @@ class SequenceVAE(nn.Module):
             hidden: [batch, seq_len, embedding_dim]
         """
         x = self.from_latent(z)
-        sz=x.size(1)
-        mask = nn.Transformer.generate_square_subsequent_mask(sz).to(x.device)
-        decoded = self.decoder(x,mask=mask)
+        # Remove causal mask for non-autoregressive diffusion - allow bidirectional attention
+        decoded = self.decoder(x)
+        # Apply output normalization to fix semantic mismatch
+        decoded = self.output_norm(decoded)
         return decoded
 
     def forward(
@@ -554,9 +558,9 @@ class SequenceVAE(nn.Module):
             )
             recon_loss = recon_loss + chunk_loss
 
-        # Average over all positions
-        total_tokens = batch_size * seq_len
-        recon_loss = recon_loss / total_tokens
+        # Average over valid tokens only (not padding)
+        num_valid_tokens = (input_ids != self.pad_token_id).sum()
+        recon_loss = recon_loss / num_valid_tokens.clamp(min=1.0)
 
         # KL loss (per position, then averaged)
         kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())

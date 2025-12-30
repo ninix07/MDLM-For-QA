@@ -71,6 +71,10 @@ class SQuAD2Dataset(Dataset):
         print(f"Loaded {len(self.examples)} examples:")
         print(f"  - Answerable: {len(self.answerable_indices)}")
         print(f"  - Unanswerable: {len(self.unanswerable_indices)}")
+        
+        # Pre-tokenize all data to store in RAM
+        print("Pre-tokenizing all data (this may take a moment...)")
+        self._pre_tokenize_all()
 
     def _load_squad(self, data_path: str) -> List[SQuADExample]:
         """Load SQuAD 2.0 JSON file."""
@@ -115,49 +119,63 @@ class SQuAD2Dataset(Dataset):
 
         return examples
 
-    def __len__(self) -> int:
-        return len(self.examples)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        example = self.examples[idx]
-
-        # Tokenize context
-        context_encoding = self.tokenizer(
-            example.context,
+    def _pre_tokenize_all(self):
+        """Pre-tokenize all examples and store in RAM to avoid repeated tokenization."""
+        self.tokenized_data = []
+        
+        # Batch tokenize for efficiency
+        contexts = [ex.context for ex in self.examples]
+        questions = [ex.question for ex in self.examples]
+        answers = [ex.answer for ex in self.examples]
+        
+        # Tokenize all contexts
+        context_encodings = self.tokenizer(
+            contexts,
             max_length=self.max_context_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
-
-        # Tokenize question
-        question_encoding = self.tokenizer(
-            example.question,
+        
+        # Tokenize all questions
+        question_encodings = self.tokenizer(
+            questions,
             max_length=self.max_question_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
-
-        # Tokenize answer
-        answer_encoding = self.tokenizer(
-            example.answer,
+        
+        # Tokenize all answers
+        answer_encodings = self.tokenizer(
+            answers,
             max_length=self.max_answer_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
+        
+        # Store tokenized data
+        for i, example in enumerate(self.examples):
+            self.tokenized_data.append({
+                "id": example.id,
+                "context_input_ids": context_encodings["input_ids"][i],
+                "context_attention_mask": context_encodings["attention_mask"][i],
+                "question_input_ids": question_encodings["input_ids"][i],
+                "question_attention_mask": question_encodings["attention_mask"][i],
+                "answer_input_ids": answer_encodings["input_ids"][i],
+                "answer_attention_mask": answer_encodings["attention_mask"][i],
+                "is_impossible": torch.tensor(example.is_impossible, dtype=torch.bool),
+            })
+        
+        print(f"Pre-tokenized {len(self.tokenized_data)} examples and stored in RAM")
 
-        return {
-            "id": example.id,
-            "context_input_ids": context_encoding["input_ids"].squeeze(0),
-            "context_attention_mask": context_encoding["attention_mask"].squeeze(0),
-            "question_input_ids": question_encoding["input_ids"].squeeze(0),
-            "question_attention_mask": question_encoding["attention_mask"].squeeze(0),
-            "answer_input_ids": answer_encoding["input_ids"].squeeze(0),
-            "answer_attention_mask": answer_encoding["attention_mask"].squeeze(0),
-            "is_impossible": torch.tensor(example.is_impossible, dtype=torch.bool),
-        }
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Return pre-tokenized data from RAM."""
+        return self.tokenized_data[idx]
 
 
 class BalancedSQuADSampler(Sampler):

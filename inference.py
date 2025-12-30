@@ -101,11 +101,16 @@ class QAInference:
         # Decode
         texts = self.model.decode_tokens_to_text(outputs["tokens"], outputs["is_null"])
 
+        # Normalize cosine similarity from [-1,1] to [0,1] before calculating confidence
+        sim = outputs["null_similarity"][0].item()
+        normalized_sim = (sim + 1) / 2  # Map [-1,1] -> [0,1]
+        confidence = 1.0 - normalized_sim
+
         return {
             "answer": texts[0],
             "is_unanswerable": outputs["is_null"][0].item(),
-            "null_similarity": outputs["null_similarity"][0].item(),
-            "confidence": 1.0 - outputs["null_similarity"][0].item(),
+            "null_similarity": sim,
+            "confidence": confidence,
         }
 
     def batch_answer(

@@ -21,33 +21,51 @@ class LatentScaler:
     def fit(self, dataloader, vae_model, device):
         """
         Compute global mean and std of latents from dataloader.
+        Optimized to keep data on GPU and reduce CPU-GPU transfers.
         """
         print("Fitting LatentScaler...")
         vae_model.eval()
         self.device = device
         
-        all_latents = []
+        # Use online statistics to avoid storing all latents in memory
+        running_mean = torch.zeros(vae_model.latent_dim, device=device)
+        running_var = torch.zeros(vae_model.latent_dim, device=device)
+        total_count = 0
         
         with torch.no_grad():
             for batch in tqdm(dataloader, desc="Computing latent stats"):
-                answer_ids = batch["answer_input_ids"].to(device)
-                answer_mask = batch["answer_attention_mask"].to(device)
+                answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
+                answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
                 
                 # Get mean latent (deterministic)
                 z = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
                 
-                # Mask out padding
+                # Mask out padding and compute statistics online
                 mask = answer_mask.bool()
-                z_masked = z[mask]
+                z_masked = z[mask]  # [valid_tokens, latent_dim]
                 
-                all_latents.append(z_masked.cpu())
+                # Online mean and variance calculation
+                batch_count = z_masked.shape[0]
+                batch_mean = z_masked.mean(dim=0)
+                batch_var = ((z_masked - batch_mean) ** 2).mean(dim=0)
+                
+                # Update running statistics
+                delta = batch_mean - running_mean
+                new_count = total_count + batch_count
+                
+                running_mean = running_mean + delta * batch_count / new_count
+                
+                # Update variance using Welford's algorithm
+                m_a = running_var * total_count
+                m_b = batch_var * batch_count
+                M2 = m_a + m_b + delta**2 * total_count * batch_count / new_count
+                running_var = M2 / new_count
+                
+                total_count = new_count
         
-        # Concatenate all latents
-        all_latents = torch.cat(all_latents, dim=0)
-        
-        # Compute stats
-        self.mean = all_latents.mean(dim=0).to(device)
-        self.std = all_latents.std(dim=0).to(device)
+        # Final statistics
+        self.mean = running_mean
+        self.std = torch.sqrt(running_var)
         
         # Avoid division by zero and handle collapsed dimensions
         self.std = torch.clamp(self.std, min=1e-3)

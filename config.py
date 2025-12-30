@@ -26,7 +26,6 @@ class ModelConfig:
     # VAE config (if using Approach B)
     use_vae: bool = True
     vae_latent_dim: int = 128
-    vae_hidden_dim: int = 512
 
     # Max sequence lengths
     max_context_length: int = 512  # Reverted to 512 (BERT limit)
@@ -35,7 +34,6 @@ class ModelConfig:
 
     # Special tokens
     null_ans_token: str = "<NULL_ANS>"
-    pad_token: str = "<pad>"
 
 
 @dataclass
@@ -58,10 +56,6 @@ class DiffusionConfig:
 
     # Prediction type: 'epsilon' (noise) or 'v' (velocity)
     prediction_type: str = "v"
-
-    # Clipping
-    clip_sample: bool = True
-    clip_sample_range: float = 1.0
 
 
 @dataclass
@@ -92,10 +86,6 @@ class TrainingConfig:
 
     # Balanced batching for SQuAD 2.0
     answerable_ratio: float = 0.75  # 75% answerable - bias heavily toward finding answers
-
-    # Auxiliary loss to keep latents close to valid embeddings
-    use_embedding_loss: bool = True
-    embedding_loss_weight: float = 0.1
 
     # False negative penalty (penalize predicting no answer when answerable)
     false_negative_penalty_weight: float = 5.0
