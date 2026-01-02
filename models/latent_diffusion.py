@@ -43,6 +43,7 @@ class LatentDiffusionQA(nn.Module):
         null_ans_token: str = "<NULL_ANS>",
         base_encoder: str = "xlm-roberta-base",
         false_negative_penalty_weight: float = 1.0,
+        false_negative_penalty_margin: float = 0.3,
         scaler: Optional[LatentScaler] = None,
         prediction_type: str = "epsilon",
     ):
@@ -55,23 +56,25 @@ class LatentDiffusionQA(nn.Module):
         self.null_ans_token = null_ans_token
         self.use_vae = use_vae
         self.false_negative_penalty_weight = false_negative_penalty_weight
+        self.false_negative_penalty_margin = false_negative_penalty_margin
         self.scaler = scaler
         self.prediction_type = prediction_type
 
         # Ensure null answer token exists
         if null_ans_token not in tokenizer.get_vocab():
-            tokenizer.add_special_tokens(
-                {"additional_special_tokens": [null_ans_token]}
-            )
+            tokenizer.add_special_tokens({"additional_special_tokens": [null_ans_token]})
         self.null_ans_token_id = tokenizer.convert_tokens_to_ids(null_ans_token)
 
         vocab_size = len(tokenizer)
         embedding_dim = 768  # BERT base hidden size (always 768, not d_model)
-        
+
         # Determine actual latent dimension
         actual_latent_dim = latent_dim if use_vae else embedding_dim
 
-        # Denoiser
+        # Get latent_seq_len from config or use default
+        self._latent_seq_len = 8  # Default, will be updated after VAE is created
+
+        # Denoiser (initialized with default, will match VAE)
         self.denoiser = ConditionalDenoiser(
             latent_dim=actual_latent_dim,
             d_model=d_model,
@@ -79,16 +82,16 @@ class LatentDiffusionQA(nn.Module):
             num_heads=num_heads,
             ff_dim=ff_dim,
             dropout=dropout,
-            max_seq_len=8,  # Matches VAE's latent_seq_len
+            max_seq_len=self._latent_seq_len,  # Use internal variable
             condition_encoder=base_encoder,
         )
 
         # Extract pretrained embeddings from denoiser's condition encoder
         pretrained_embeddings = None
-        if hasattr(self.denoiser.condition_encoder, 'embeddings'):
+        if hasattr(self.denoiser.condition_encoder, "embeddings"):
             # BERT/RoBERTa style
             pretrained_embeddings = self.denoiser.condition_encoder.embeddings.word_embeddings
-        elif hasattr(self.denoiser.condition_encoder, 'model'):
+        elif hasattr(self.denoiser.condition_encoder, "model"):
             # XLM-R style (sometimes wrapped)
             pretrained_embeddings = self.denoiser.condition_encoder.model.embeddings.word_embeddings
         else:
@@ -105,8 +108,10 @@ class LatentDiffusionQA(nn.Module):
                 dropout=dropout,
                 pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
                 pad_token_id=self.pad_token_id,
-                latent_seq_len=8,  # Structural Bottleneck
+                latent_seq_len=self._latent_seq_len,
             )
+            # FIX: Update latent_seq_len from VAE to ensure consistency
+            self._latent_seq_len = self.vae.latent_seq_len
         else:
             self.vae = EmbeddingBridge(model_name=base_encoder)
             self.latent_dim = embedding_dim
@@ -131,10 +136,7 @@ class LatentDiffusionQA(nn.Module):
 
     def get_null_ans_embedding(self, device: torch.device) -> torch.Tensor:
         """Get or compute the null answer embedding."""
-        if (
-            self._null_ans_embedding is None
-            or self._null_ans_embedding.device != device
-        ):
+        if self._null_ans_embedding is None or self._null_ans_embedding.device != device:
             null_ids = torch.tensor([[self.null_ans_token_id]], device=device)
             if self.use_vae:
                 with torch.no_grad():
@@ -145,7 +147,9 @@ class LatentDiffusionQA(nn.Module):
             self._null_ans_embedding = null_emb.squeeze(0)
         return self._null_ans_embedding
 
-    def encode_answer(self, answer_ids: torch.Tensor, answer_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def encode_answer(
+        self, answer_ids: torch.Tensor, answer_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Encode answer tokens to latent space."""
         if self.use_vae:
             return self.vae.get_latent(answer_ids, answer_mask, use_mean=True)
@@ -159,11 +163,12 @@ class LatentDiffusionQA(nn.Module):
     ) -> torch.Tensor:
         """Decode latent back to tokens."""
         if self.use_vae:
-            hidden = self.vae.decode(z)
+            # Use max_answer_len for proper sequence length
+            hidden = self.vae.decode(z, target_len=self.max_answer_len)
             # Project hidden to logits using embedding weight tying
             embed_weight = self.vae.embeddings.weight
             logits = torch.matmul(hidden, embed_weight.T)
-            
+
             if return_tokens:
                 return logits.argmax(dim=-1)
             return logits
@@ -178,13 +183,14 @@ class LatentDiffusionQA(nn.Module):
         """Reconstruct answers using only the VAE."""
         # Encode to latent
         z, _ = self.encode_answer(answer_ids, answer_mask)
-        
+
         # Decode latent to tokens
         tokens = self.decode_latent(z, return_tokens=True)
-        
-        # Identify null answers (first token is null_ans_token_id)
-        is_null = (tokens[:, 1] == self.null_ans_token_id)
-        
+
+        # FIX Bug 2: Compare with ground truth answer_ids for null detection
+        # The decoded tokens structure may differ, so we check original answer_ids
+        is_null = answer_ids[:, 1] == self.null_ans_token_id
+
         return {
             "tokens": tokens,
             "is_null": is_null,
@@ -220,7 +226,7 @@ class LatentDiffusionQA(nn.Module):
             vae_loss = vae_output["loss"]
             recon_loss = vae_output.get("recon_loss", torch.tensor(0.0, device=answer_ids.device))
             kl_loss = vae_output.get("kl_loss", torch.tensor(0.0, device=answer_ids.device))
-            
+
             if train_vae_only:
                 ret = {
                     "loss": vae_loss,
@@ -237,8 +243,19 @@ class LatentDiffusionQA(nn.Module):
                     ret["z"] = vae_output["z"]
                 return ret
 
-        # Encode answer to latent
-        z_0, latent_mask = self.encode_answer(answer_ids, answer_mask)
+        # FIX: Reuse mean from VAE loss computation instead of re-encoding
+        # This ensures consistency and avoids redundant computation
+        if self.use_vae and "mean" in vae_output:
+            # Use deterministic mean for diffusion (matches inference behavior)
+            z_0 = vae_output["mean"]
+            # Recompute latent_mask from answer_mask (downsample to latent_seq_len)
+            latent_mask = F.adaptive_max_pool1d(
+                answer_mask.unsqueeze(1).float(), self._latent_seq_len
+            ).squeeze(1)
+            latent_mask = (latent_mask > 0.5).float()
+        else:
+            # Fallback for non-VAE case
+            z_0, latent_mask = self.encode_answer(answer_ids, answer_mask)
 
         # Requirement 2: Latent Calibration
         # Normalize latent if scaler is provided
@@ -249,31 +266,32 @@ class LatentDiffusionQA(nn.Module):
         # This is required for CFG to work at inference
         if self.training and cond_dropout_prob > 0:
             # Create a mask: 1 for dropout (null), 0 for keep
-            drop_mask = torch.bernoulli(torch.full((context_ids.shape[0],), cond_dropout_prob, device=context_ids.device)).bool()
-            
-            # Clone to avoid modifying original batch for other logging
-            context_ids = context_ids.clone()
-            question_ids = question_ids.clone()
+            drop_mask = torch.bernoulli(
+                torch.full((context_ids.shape[0],), cond_dropout_prob, device=context_ids.device)
+            ).bool()
+
+            # FIX: Clone masks before modifying to avoid mutating dataloader tensors
+            # This prevents issues with gradient accumulation and debugging
             context_mask = context_mask.clone()
             question_mask = question_mask.clone()
-            
-            # Replace with PAD tokens to represent "No Context"
-            context_ids[drop_mask] = self.pad_token_id
-            question_ids[drop_mask] = self.pad_token_id
-            
+
             # CRITICAL FIX: Refined Dropout
-            # Instead of masking all tokens (which creates a strong "Null" signal),
-            # we mask everything EXCEPT the first token.
-            # The first token becomes a "dummy" valid token (PAD embedding).
-            # This prevents the model from attending to a long sequence of identical PADs.
-            
+            # Instead of replacing tokens with PAD (which has learned embedding),
+            # we just zero out the attention mask.
+            # This effectively removes the context from the attention mechanism.
+
             # 1. Set mask to 0 everywhere for dropped samples
             context_mask[drop_mask] = 0
             question_mask[drop_mask] = 0
-            
-            # 2. Set mask to 1 only for the first token
+
+            # 2. Set mask to 1 only for the first token (dummy token)
+            # This prevents NaN in attention softmax if all masks are zero
             context_mask[drop_mask, 0] = 1
             question_mask[drop_mask, 0] = 1
+
+            # Note: We don't need to change input_ids to PAD because mask handles it.
+            # But for safety/consistency, we can set them to PAD if we want,
+            # but keeping original IDs with 0 mask is cleaner for "no signal".
 
         # Diffusion training loss
         condition_kwargs = {
@@ -292,16 +310,15 @@ class LatentDiffusionQA(nn.Module):
             # But wait, the VAE produces a sequence.
             # If the answer is unanswerable, the input `answer_ids` should already be [NULL_ANS, PAD, PAD...]
             # So `z_0` computed from `answer_ids` is ALREADY the null latent sequence!
-            # Since the data loader prepares unanswerable questions as [NULL_ANS] + [PAD]..., 
+            # Since the data loader prepares unanswerable questions as [NULL_ANS] + [PAD]...,
             # z_0 is already correct.
             pass
 
         # Identify answerable questions (for logging or other logic if needed, but not for penalty)
-        is_unanswerable = (answer_ids[:, 1] == self.null_ans_token_id)
-        is_answerable = ~is_unanswerable
-
-        # Identify answerable questions (for logging or other logic if needed, but not for penalty)
-        is_unanswerable = (answer_ids[:, 1] == self.null_ans_token_id)
+        # FIX: Check correct index for unanswerable token
+        # XLM-R: [<s>, <NULL_ANS>, </s>, <pad>...] -> Index 1 is NULL_ANS
+        # BERT: [CLS, <NULL_ANS>, SEP, <pad>...] -> Index 1 is NULL_ANS
+        is_unanswerable = answer_ids[:, 1] == self.null_ans_token_id
         is_answerable = ~is_unanswerable
 
         # Requirement 3: False Negative Penalty
@@ -309,102 +326,101 @@ class LatentDiffusionQA(nn.Module):
         # We check the distance between the predicted noise (or implied x_0) and the null embedding.
         # However, diffusion predicts NOISE, not x_0 directly in the loss wrapper usually.
         # But we can look at the diffusion loss itself? No, that's just MSE.
-        
+
         # We need to compute the predicted x_0 from the noise prediction to do this properly,
         # OR we can just add a penalty on the predicted noise if we knew what "null noise" looked like (we don't).
-        
+
         # Alternative: The user wants to avoid "converging into everything being unanswerable".
         # This often happens if the null sink is a strong attractor.
-        # Let's add a penalty that pushes the predicted x_0 AWAY from the null embedding 
+        # Let's add a penalty that pushes the predicted x_0 AWAY from the null embedding
         # if the ground truth is answerable.
-        
+
         diff_output = self.diffusion.training_loss(
-            self.denoiser, 
-            z_0, 
-            condition_kwargs, 
+            self.denoiser,
+            z_0,
+            condition_kwargs,
             mask=latent_mask,
         )
         diffusion_loss = diff_output["loss"]
-        
-        penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
-        
-        if self.false_negative_penalty_weight > 0 and is_answerable.any():
-             # Sample a few answerable examples
-             subset_indices = torch.where(is_answerable)[0]
-             if len(subset_indices) > 4:
-                 subset_indices = subset_indices[:4]
-             
-             # Retrieve necessary tensors for the subset from diff_output
-             # We reuse the noise and t sampled in training_loss to avoid extra forward passes
-             z_ans = z_0[subset_indices]
-             t_ans = diff_output["t"][subset_indices]
-             noise_ans = diff_output["noise"][subset_indices]
-             model_output_ans = diff_output["model_output"][subset_indices]
-             
-             # Reconstruct z_t (using the same noise/t as in training_loss)
-             z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
-             
-             # Predict x_0 using the unified method
-             pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
-             
-             # STABLE NORMALIZATION: Clip pred_x0 to prevent inf values
-             # Latents are typically unit variance, so [-20, 20] is a very safe bound
-             # that prevents overflow during norm calculation.
-             pred_x0 = torch.clamp(pred_x0, -20.0, 20.0)
-             
-             # Get null embedding
-             null_emb = self.get_null_ans_embedding(z_0.device)
-             if self.scaler is not None:
-                 null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
-             
-             # FIX: Use Cosine Similarity instead of Euclidean distance
-             # Euclidean distance in 768-D space can be huge, causing hinge loss to be 0
-             # Cosine similarity is bounded [-1, 1] and numerically stable
-             pred_mean = pred_x0.mean(dim=1)  # [batch, dim]
-             null_mean = null_emb.mean(dim=0)  # [dim]
-             
-             # Normalize for cosine similarity
-             pred_norm = F.normalize(pred_mean, p=2, dim=-1)
-             null_norm = F.normalize(null_mean.unsqueeze(0), p=2, dim=-1)
-             
-             # Cosine similarity: high value means prediction is close to null
-             cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
-             
-             # Penalty: we want to push AWAY from null for answerable questions
-             # When cos_sim is high (close to null), penalty should be high
-             # Using (1 + cos_sim) / 2 to map from [-1,1] to [0,1]
-             # Then square it to emphasize high similarity cases
-             null_proximity = ((1 + cos_sim) / 2) ** 2
-             penalty = null_proximity.mean()
-             
-             penalty_loss = self.false_negative_penalty_weight * penalty
-             
-             # FINAL SAFETY CHECK: Zero out if NaN or Inf
-             if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
-                 penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
-        # Scale penalty_loss by 5.0 to break the Null attractor
-        # Making false negatives the most expensive mistake
+        penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
+
+        if self.false_negative_penalty_weight > 0 and is_answerable.any():
+            # Apply penalty to ALL answerable examples, not just a subset
+            subset_indices = torch.where(is_answerable)[0]
+
+            # Sample randomly if too many (for memory efficiency)
+            if len(subset_indices) > 8:
+                perm = torch.randperm(len(subset_indices))[:8]
+                subset_indices = subset_indices[perm]
+
+            # Retrieve necessary tensors for the subset from diff_output
+            # We reuse the noise and t sampled in training_loss to avoid extra forward passes
+            z_ans = z_0[subset_indices]
+            t_ans = diff_output["t"][subset_indices]
+            noise_ans = diff_output["noise"][subset_indices]
+            model_output_ans = diff_output["model_output"][subset_indices]
+
+            # Reconstruct z_t (using the same noise/t as in training_loss)
+            z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
+
+            # Predict x_0 using the unified method
+            pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
+
+            # STABLE NORMALIZATION: Clip pred_x0 to prevent inf values
+            # Latents are typically unit variance, so [-20, 20] is a very safe bound
+            # that prevents overflow during norm calculation.
+            pred_x0 = torch.clamp(pred_x0, -20.0, 20.0)
+
+            # Get null embedding
+            null_emb = self.get_null_ans_embedding(z_0.device)
+            if self.scaler is not None:
+                null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
+
+            # FIX: Use Cosine Similarity properly
+            pred_mean = pred_x0.mean(dim=1)  # [batch, dim]
+            null_mean = null_emb.mean(dim=0)  # [dim]
+
+            # Normalize for cosine similarity
+            pred_norm = F.normalize(pred_mean, p=2, dim=-1)
+            null_norm = F.normalize(null_mean.unsqueeze(0), p=2, dim=-1)
+
+            # Cosine similarity: high value means prediction is close to null
+            cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
+
+            # Penalty: we want to push AWAY from null for answerable questions
+            # Use hinge loss: Penalty = max(0, cos_sim - margin)
+            # If cos_sim > margin (too close to null), apply penalty
+            margin = self.false_negative_penalty_margin
+            penalty = F.relu(cos_sim - margin).mean()
+
+            penalty_loss = self.false_negative_penalty_weight * penalty
+
+            # FINAL SAFETY CHECK: Zero out if NaN or Inf
+            if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
+                penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
+
+        # Combine losses (penalty already scaled by false_negative_penalty_weight in config)
         if self.use_vae:
-            total_loss = diffusion_loss + (vae_loss * 0.1) + (penalty_loss * 5.0)
+            total_loss = diffusion_loss + (vae_loss * 0.1) + penalty_loss
         else:
-            total_loss = diffusion_loss + (penalty_loss * 5.0)
-        
+            total_loss = diffusion_loss + penalty_loss
+
         ret = {
             "loss": total_loss,
             "diffusion_loss": diffusion_loss,
             "vae_loss": vae_loss,
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
-            "penalty": penalty_loss
+            "penalty": penalty_loss,
         }
-        
+
         if "z" in vae_output:
             ret["z"] = vae_output["z"]
         if "mean" in vae_output:
             ret["mean"] = vae_output["mean"]
             ret["logvar"] = vae_output["logvar"]
-            
+
         return ret
 
     @torch.no_grad()
@@ -431,25 +447,25 @@ class LatentDiffusionQA(nn.Module):
         batch_size = context_ids.shape[0]
         device = context_ids.device
 
-        # Sample from diffusion
-        shape = (batch_size, 8, self.latent_dim)
-        
+        # Sample from diffusion - use latent_seq_len property
+        shape = (batch_size, self._latent_seq_len, self.latent_dim)
+
         # Temporarily override num_inference_steps if provided
         original_steps = self.sampler.num_inference_steps
         if num_inference_steps is not None:
             self.sampler.num_inference_steps = num_inference_steps
-            
+
         try:
             # PREPARE NULL CONDITIONING FOR PASS 2
             uncond_context_ids = torch.full_like(context_ids, self.pad_token_id)
             # Match training logic: Mask all except first token
             uncond_context_mask = torch.zeros_like(context_mask)
             uncond_context_mask[:, 0] = 1
-            
+
             uncond_question_ids = torch.full_like(question_ids, self.pad_token_id)
             uncond_question_mask = torch.zeros_like(question_mask)
             uncond_question_mask[:, 0] = 1
-            
+
             z_0 = self.sampler.sample(
                 self.denoiser,
                 shape,
@@ -475,8 +491,8 @@ class LatentDiffusionQA(nn.Module):
         tokens = self.decode_latent(z_denorm, return_tokens=True)
 
         # 2. Check for null answer (in NORMALIZED space)
-        null_raw = self.get_null_ans_embedding(device) # [seq_len, dim]
-        
+        null_raw = self.get_null_ans_embedding(device)  # [seq_len, dim]
+
         # Transform the null reference into the diffusion space
         if self.scaler is not None:
             # Scaler expects [batch, seq, dim]
@@ -485,9 +501,9 @@ class LatentDiffusionQA(nn.Module):
             null_norm_ref = null_raw
 
         # Compare normalized generated z_0 with normalized reference
-        z_pooled = z_0.mean(dim=1) 
+        z_pooled = z_0.mean(dim=1)
         null_pooled = null_norm_ref.mean(dim=0)
-        
+
         z_vec = F.normalize(z_pooled, p=2, dim=-1)
         n_vec = F.normalize(null_pooled.unsqueeze(0), p=2, dim=-1)
         null_similarity = (z_vec * n_vec).sum(dim=-1)
@@ -509,42 +525,43 @@ class LatentDiffusionQA(nn.Module):
         """Convert token IDs to text strings."""
         batch_size = tokens.shape[0]
         texts = [""] * batch_size
-        
+
         # Identify non-null indices
         active_indices = torch.where(~is_null)[0]
         if len(active_indices) == 0:
             return texts
-            
+
         active_tokens = tokens[active_indices]
-        
+
         # 2. THE EOS TRICK: Find the first occurrence of a Stop Token
         # This acts as a 'Wall' that stops the decoder from reading gibberish.
-        sep_id = self.tokenizer.sep_token_id 
-        pad_id = self.tokenizer.pad_token_id 
-        
+        sep_id = self.tokenizer.sep_token_id
+        pad_id = self.tokenizer.pad_token_id
+
         # Convert to list for easier processing if needed, but batch_decode is better
         # We still need to truncate at the first stop token for each sequence
+        # FIX Bug 11: Skip BOS/CLS token at the start (index 0)
         truncated_tokens = []
         for i in range(len(active_tokens)):
             row = active_tokens[i].tolist()
+            # Skip the first token (BOS/CLS)
+            row = row[1:] if len(row) > 1 else row
             stop_idx = len(row)
             for idx, tid in enumerate(row):
                 if tid == sep_id or tid == pad_id:
                     stop_idx = idx
                     break
             truncated_tokens.append(row[:stop_idx])
-            
+
         # 4. Decode only the valid tokens into clean strings
         decoded_texts = self.tokenizer.batch_decode(
-            truncated_tokens, 
-            skip_special_tokens=True, 
-            clean_up_tokenization_spaces=True
+            truncated_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )
-        
+
         # Fill in the results
         for idx, text in zip(active_indices.tolist(), decoded_texts):
             texts[idx] = text.strip()
-            
+
         return texts
 
     def to(self, device: torch.device):

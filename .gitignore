@@ -92,3 +92,17 @@ dmypy.json
 
 # *.txt
 *.csv
+
+
+*.md
+
+*.txt
+
+
+*verify*.py
+
+*benchmark*.py
+*check*.py
+*reproduce*.py
+
+

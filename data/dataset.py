@@ -51,9 +51,7 @@ class SQuAD2Dataset(Dataset):
 
         # Add special token if not present
         if null_ans_token not in tokenizer.get_vocab():
-            tokenizer.add_special_tokens(
-                {"additional_special_tokens": [null_ans_token]}
-            )
+            tokenizer.add_special_tokens({"additional_special_tokens": [null_ans_token]})
 
         self.null_ans_token_id = tokenizer.convert_tokens_to_ids(null_ans_token)
 
@@ -61,17 +59,13 @@ class SQuAD2Dataset(Dataset):
         self.examples = self._load_squad(data_path)
 
         # Separate answerable and unanswerable for balanced sampling
-        self.answerable_indices = [
-            i for i, ex in enumerate(self.examples) if not ex.is_impossible
-        ]
-        self.unanswerable_indices = [
-            i for i, ex in enumerate(self.examples) if ex.is_impossible
-        ]
+        self.answerable_indices = [i for i, ex in enumerate(self.examples) if not ex.is_impossible]
+        self.unanswerable_indices = [i for i, ex in enumerate(self.examples) if ex.is_impossible]
 
         print(f"Loaded {len(self.examples)} examples:")
         print(f"  - Answerable: {len(self.answerable_indices)}")
         print(f"  - Unanswerable: {len(self.unanswerable_indices)}")
-        
+
         # Pre-tokenize all data to store in RAM
         print("Pre-tokenizing all data (this may take a moment...)")
         self._pre_tokenize_all()
@@ -122,12 +116,12 @@ class SQuAD2Dataset(Dataset):
     def _pre_tokenize_all(self):
         """Pre-tokenize all examples and store in RAM to avoid repeated tokenization."""
         self.tokenized_data = []
-        
+
         # Batch tokenize for efficiency
         contexts = [ex.context for ex in self.examples]
         questions = [ex.question for ex in self.examples]
         answers = [ex.answer for ex in self.examples]
-        
+
         # Tokenize all contexts
         context_encodings = self.tokenizer(
             contexts,
@@ -136,7 +130,7 @@ class SQuAD2Dataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        
+
         # Tokenize all questions
         question_encodings = self.tokenizer(
             questions,
@@ -145,7 +139,7 @@ class SQuAD2Dataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        
+
         # Tokenize all answers
         answer_encodings = self.tokenizer(
             answers,
@@ -154,20 +148,22 @@ class SQuAD2Dataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        
+
         # Store tokenized data
         for i, example in enumerate(self.examples):
-            self.tokenized_data.append({
-                "id": example.id,
-                "context_input_ids": context_encodings["input_ids"][i],
-                "context_attention_mask": context_encodings["attention_mask"][i],
-                "question_input_ids": question_encodings["input_ids"][i],
-                "question_attention_mask": question_encodings["attention_mask"][i],
-                "answer_input_ids": answer_encodings["input_ids"][i],
-                "answer_attention_mask": answer_encodings["attention_mask"][i],
-                "is_impossible": torch.tensor(example.is_impossible, dtype=torch.bool),
-            })
-        
+            self.tokenized_data.append(
+                {
+                    "id": example.id,
+                    "context_input_ids": context_encodings["input_ids"][i],
+                    "context_attention_mask": context_encodings["attention_mask"][i],
+                    "question_input_ids": question_encodings["input_ids"][i],
+                    "question_attention_mask": question_encodings["attention_mask"][i],
+                    "answer_input_ids": answer_encodings["input_ids"][i],
+                    "answer_attention_mask": answer_encodings["attention_mask"][i],
+                    "is_impossible": torch.tensor(example.is_impossible, dtype=torch.bool),
+                }
+            )
+
         print(f"Pre-tokenized {len(self.tokenized_data)} examples and stored in RAM")
 
     def __len__(self) -> int:
@@ -208,12 +204,8 @@ class BalancedSQuADSampler(Sampler):
         self.unanswerable_per_batch = batch_size - self.answerable_per_batch
 
         # Calculate total batches
-        max_answerable_batches = (
-            len(self.answerable_indices) // self.answerable_per_batch
-        )
-        max_unanswerable_batches = (
-            len(self.unanswerable_indices) // self.unanswerable_per_batch
-        )
+        max_answerable_batches = len(self.answerable_indices) // self.answerable_per_batch
+        max_unanswerable_batches = len(self.unanswerable_indices) // self.unanswerable_per_batch
         self.num_batches = min(max_answerable_batches, max_unanswerable_batches)
 
     def __iter__(self):
@@ -229,9 +221,7 @@ class BalancedSQuADSampler(Sampler):
 
             # Add answerable samples
             batch_indices.extend(
-                self.answerable_indices[
-                    answerable_idx : answerable_idx + self.answerable_per_batch
-                ]
+                self.answerable_indices[answerable_idx : answerable_idx + self.answerable_per_batch]
             )
             answerable_idx += self.answerable_per_batch
 
@@ -251,6 +241,22 @@ class BalancedSQuADSampler(Sampler):
 
     def __len__(self) -> int:
         return self.num_batches * self.batch_size
+
+
+def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    """Custom collate function for batching. Handles string IDs properly."""
+    ids = [item["id"] for item in batch]
+
+    return {
+        "ids": ids,
+        "context_input_ids": torch.stack([item["context_input_ids"] for item in batch]),
+        "context_attention_mask": torch.stack([item["context_attention_mask"] for item in batch]),
+        "question_input_ids": torch.stack([item["question_input_ids"] for item in batch]),
+        "question_attention_mask": torch.stack([item["question_attention_mask"] for item in batch]),
+        "answer_input_ids": torch.stack([item["answer_input_ids"] for item in batch]),
+        "answer_attention_mask": torch.stack([item["answer_attention_mask"] for item in batch]),
+        "is_impossible": torch.stack([item["is_impossible"] for item in batch]),
+    }
 
 
 def create_dataloader(
@@ -294,6 +300,7 @@ def create_dataloader(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=True,
+            collate_fn=collate_fn,  # Use custom collate to handle string IDs
         )
     else:
         dataloader = DataLoader(
@@ -303,30 +310,7 @@ def create_dataloader(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=True,
+            collate_fn=collate_fn,  # Use custom collate to handle string IDs
         )
 
     return dataloader, dataset
-
-
-def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """Custom collate function for batching."""
-    ids = [item["id"] for item in batch]
-
-    return {
-        "ids": ids,
-        "context_input_ids": torch.stack([item["context_input_ids"] for item in batch]),
-        "context_attention_mask": torch.stack(
-            [item["context_attention_mask"] for item in batch]
-        ),
-        "question_input_ids": torch.stack(
-            [item["question_input_ids"] for item in batch]
-        ),
-        "question_attention_mask": torch.stack(
-            [item["question_attention_mask"] for item in batch]
-        ),
-        "answer_input_ids": torch.stack([item["answer_input_ids"] for item in batch]),
-        "answer_attention_mask": torch.stack(
-            [item["answer_attention_mask"] for item in batch]
-        ),
-        "is_impossible": torch.stack([item["is_impossible"] for item in batch]),
-    }

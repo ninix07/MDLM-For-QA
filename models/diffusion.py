@@ -33,7 +33,9 @@ class NoiseScheduler:
         elif schedule_type == "cosine":
             betas = self._cosine_schedule(num_timesteps, cosine_s, device)
         elif schedule_type == "sqrt":
-            betas = torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, device=device) ** 2
+            betas = (
+                torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, device=device) ** 2
+            )
         else:
             raise ValueError(f"Unknown schedule type: {schedule_type}")
 
@@ -57,18 +59,16 @@ class NoiseScheduler:
             betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
         self.posterior_mean_coef2 = (
-            (1.0 - self.alphas_cumprod_prev)
-            * torch.sqrt(self.alphas)
-            / (1.0 - self.alphas_cumprod)
+            (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
         )
 
-    def _cosine_schedule(self, num_timesteps: int, s: float = 0.008, device: Optional[torch.device] = None) -> torch.Tensor:
+    def _cosine_schedule(
+        self, num_timesteps: int, s: float = 0.008, device: Optional[torch.device] = None
+    ) -> torch.Tensor:
         """Cosine schedule as proposed in Improved DDPM."""
         steps = num_timesteps + 1
         t = torch.linspace(0, num_timesteps, steps, device=device)
-        alphas_cumprod = (
-            torch.cos(((t / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
-        )
+        alphas_cumprod = torch.cos(((t / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
         betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
         return torch.clamp(betas, 0.0001, 0.9999)
@@ -77,27 +77,32 @@ class NoiseScheduler:
         """Move all tensors to device - optimized batch operation."""
         if self.device == device:
             return self  # Already on correct device
-            
+
         self.device = device
-        
+
         # Batch move all tensors at once for efficiency
         tensors = [
-            self.betas, self.alphas, self.alphas_cumprod, self.alphas_cumprod_prev,
-            self.sqrt_alphas_cumprod, self.sqrt_one_minus_alphas_cumprod,
-            self.sqrt_recip_alphas_cumprod, self.sqrt_recipm1_alphas_cumprod,
-            self.posterior_variance, self.posterior_log_variance_clipped,
-            self.posterior_mean_coef1, self.posterior_mean_coef2
+            self.betas,
+            self.alphas,
+            self.alphas_cumprod,
+            self.alphas_cumprod_prev,
+            self.sqrt_alphas_cumprod,
+            self.sqrt_one_minus_alphas_cumprod,
+            self.sqrt_recip_alphas_cumprod,
+            self.sqrt_recipm1_alphas_cumprod,
+            self.posterior_variance,
+            self.posterior_log_variance_clipped,
+            self.posterior_mean_coef1,
+            self.posterior_mean_coef2,
         ]
-        
+
         # Move all tensors in a single operation
         for tensor in tensors:
             tensor.data = tensor.data.to(device)
-            
+
         return self
 
-    def _extract(
-        self, a: torch.Tensor, t: torch.Tensor, x_shape: Tuple
-    ) -> torch.Tensor:
+    def _extract(self, a: torch.Tensor, t: torch.Tensor, x_shape: Tuple) -> torch.Tensor:
         """Extract values from a at indices t, broadcast to x_shape."""
         batch_size = t.shape[0]
         out = a.gather(-1, t)
@@ -132,9 +137,7 @@ class GaussianDiffusion(nn.Module):
         if noise is None:
             noise = torch.randn_like(x_0)
 
-        sqrt_alpha = self.scheduler._extract(
-            self.scheduler.sqrt_alphas_cumprod, t, x_0.shape
-        )
+        sqrt_alpha = self.scheduler._extract(self.scheduler.sqrt_alphas_cumprod, t, x_0.shape)
         sqrt_one_minus_alpha = self.scheduler._extract(
             self.scheduler.sqrt_one_minus_alphas_cumprod, t, x_0.shape
         )
@@ -149,13 +152,11 @@ class GaussianDiffusion(nn.Module):
         model_output: torch.Tensor,
     ) -> torch.Tensor:
         """Predict x_0 from z_t and model output (epsilon or v)."""
-        sqrt_alpha = self.scheduler._extract(
-            self.scheduler.sqrt_alphas_cumprod, t, z_t.shape
-        )
+        sqrt_alpha = self.scheduler._extract(self.scheduler.sqrt_alphas_cumprod, t, z_t.shape)
         sqrt_one_minus_alpha = self.scheduler._extract(
             self.scheduler.sqrt_one_minus_alphas_cumprod, t, z_t.shape
         )
-        
+
         if self.prediction_type == "epsilon":
             return (z_t - sqrt_one_minus_alpha * model_output) / sqrt_alpha
         elif self.prediction_type == "v":
@@ -170,9 +171,7 @@ class GaussianDiffusion(nn.Module):
         noise: torch.Tensor,
     ) -> torch.Tensor:
         """Predict x_0 from z_t and predicted noise (always assumes epsilon)."""
-        sqrt_recip = self.scheduler._extract(
-            self.scheduler.sqrt_recip_alphas_cumprod, t, z_t.shape
-        )
+        sqrt_recip = self.scheduler._extract(self.scheduler.sqrt_recip_alphas_cumprod, t, z_t.shape)
         sqrt_recipm1 = self.scheduler._extract(
             self.scheduler.sqrt_recipm1_alphas_cumprod, t, z_t.shape
         )
@@ -185,16 +184,10 @@ class GaussianDiffusion(nn.Module):
         t: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute posterior q(z_{t-1} | z_t, x_0)."""
-        coef1 = self.scheduler._extract(
-            self.scheduler.posterior_mean_coef1, t, z_t.shape
-        )
-        coef2 = self.scheduler._extract(
-            self.scheduler.posterior_mean_coef2, t, z_t.shape
-        )
+        coef1 = self.scheduler._extract(self.scheduler.posterior_mean_coef1, t, z_t.shape)
+        coef2 = self.scheduler._extract(self.scheduler.posterior_mean_coef2, t, z_t.shape)
         posterior_mean = coef1 * x_0 + coef2 * z_t
-        posterior_var = self.scheduler._extract(
-            self.scheduler.posterior_variance, t, z_t.shape
-        )
+        posterior_var = self.scheduler._extract(self.scheduler.posterior_variance, t, z_t.shape)
         return posterior_mean, posterior_var
 
     def training_loss(
@@ -211,7 +204,7 @@ class GaussianDiffusion(nn.Module):
             model: Denoiser model
             x_0: Clean latent [batch, seq_len, dim]
             condition_kwargs: Dict with context_ids, context_mask, question_ids, question_mask
-            mask: Optional mask for valid positions
+            mask: Optional mask for valid latent positions (1=valid, 0=pad)
         """
         batch_size = x_0.shape[0]
         device = x_0.device
@@ -219,16 +212,15 @@ class GaussianDiffusion(nn.Module):
         t = torch.randint(0, self.num_timesteps, (batch_size,), device=device)
         z_t, noise = self.q_sample(x_0, t)
 
-        model_output = model(z_t, t, **condition_kwargs)
+        # FIX: Pass z_mask to denoiser so self-attention can ignore padded positions
+        model_output = model(z_t, t, z_mask=mask, **condition_kwargs)
 
         # Determine target based on prediction type
         if self.prediction_type == "epsilon":
             target = noise
         elif self.prediction_type == "v":
             # v = sqrt(alpha_bar) * noise - sqrt(1 - alpha_bar) * x_0
-            sqrt_alpha = self.scheduler._extract(
-                self.scheduler.sqrt_alphas_cumprod, t, x_0.shape
-            )
+            sqrt_alpha = self.scheduler._extract(self.scheduler.sqrt_alphas_cumprod, t, x_0.shape)
             sqrt_one_minus_alpha = self.scheduler._extract(
                 self.scheduler.sqrt_one_minus_alphas_cumprod, t, x_0.shape
             )
@@ -240,11 +232,11 @@ class GaussianDiffusion(nn.Module):
         # SNR(t) = alpha_bar_t / (1 - alpha_bar_t)
         alphas_cumprod = self.scheduler.alphas_cumprod.to(device)
         alpha_bar_t = alphas_cumprod[t]
-        
+
         # Min-SNR weighting strategy (Hang et al. 2023)
         gamma = 5.0
         snr = alpha_bar_t / (1 - alpha_bar_t).clamp(min=1e-8)
-        
+
         if self.prediction_type == "epsilon":
             mse_weight = torch.minimum(torch.ones_like(snr), gamma / snr)
         elif self.prediction_type == "v":
@@ -256,7 +248,7 @@ class GaussianDiffusion(nn.Module):
 
         # Expand for element-wise multiplication: [batch, 1, 1]
         mse_weight = mse_weight.view(-1, 1, 1)
-        
+
         if mask is not None:
             mask = mask.unsqueeze(-1).float()
             loss = F.mse_loss(model_output, target, reduction="none")
@@ -264,7 +256,6 @@ class GaussianDiffusion(nn.Module):
             loss = (loss * mse_weight * mask).sum() / mask.sum().clamp(min=1)
         else:
             loss = (F.mse_loss(model_output, target, reduction="none") * mse_weight).mean()
-
 
         return {
             "loss": loss,

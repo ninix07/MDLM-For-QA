@@ -14,7 +14,7 @@ class ModelConfig:
     base_encoder: str = "bert-base-uncased"
 
     # Latent dimensions (VAE compresses to this)
-    latent_dim: int = 768  # VAE latent dimension (smaller than embedding_dim)
+    latent_dim: int = 256  # VAE latent dimension (smaller than embedding_dim)
 
     # Denoiser Transformer config
     denoiser_layers: int = 12  # Increased to 12 for deep cross-attention on 512-token contexts
@@ -25,7 +25,7 @@ class ModelConfig:
 
     # VAE config (if using Approach B)
     use_vae: bool = True
-    vae_latent_dim: int = 768
+    vae_latent_dim: int = 256
 
     # Max sequence lengths
     max_context_length: int = 512  # Reverted to 512 (BERT limit)
@@ -89,6 +89,7 @@ class TrainingConfig:
 
     # False negative penalty (penalize predicting no answer when answerable)
     false_negative_penalty_weight: float = 5.0
+    false_negative_penalty_margin: float = 0.3  # Margin for hinge loss
 
     # Checkpointing
     output_dir: str = "./checkpoints"

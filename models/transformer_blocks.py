@@ -57,7 +57,7 @@ class ConditionalTransformerBlock(nn.Module):
             if all_masked.any():
                 x_mask = x_mask.clone()
                 x_mask[all_masked, 0] = False # Unmask first token
-                
+
         h, _ = self.self_attn(h, h, h, key_padding_mask=x_mask)
         x = x + gt1.unsqueeze(1) * h
         

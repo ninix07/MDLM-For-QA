@@ -221,6 +221,10 @@ class CachedDDIMSampler:
         batch_size = shape[0]
         z_t = torch.randn(shape, device=device)
 
+        # FIX Bug 5: Clear cached unconditional to avoid stale values across calls
+        if hasattr(self, "_cached_uncond"):
+            delattr(self, "_cached_uncond")
+
         # Encode condition
         condition, condition_mask = model.encode_condition(
             context_ids, context_mask, question_ids, question_mask
@@ -276,8 +280,8 @@ class CachedDDIMSampler:
                 t_prev = self.timesteps[i + 1]
                 alpha_bar_prev = self.scheduler.alphas_cumprod[t_prev]
             else:
-                # Use the first value of alphas_cumprod (clean state)
-                alpha_bar_prev = self.scheduler.alphas_cumprod_prev[0]
+                # FIX Bug 6: Use 1.0 directly for final step (consistent with DDIMSampler)
+                alpha_bar_prev = torch.tensor(1.0, device=device)
 
             # Derive pred_z0 and pred_epsilon
             if self.prediction_type == "epsilon":
