@@ -3,6 +3,8 @@ Training script for Multilingual Latent Diffusion Model on SQuAD 2.0.
 """
 
 import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import json
 import random
 import argparse
@@ -20,7 +22,6 @@ from tqdm import tqdm
 from config import Config, get_config
 from data import create_dataloader
 from models import LatentDiffusionQA
-from models.scaler import LatentScaler
 from models.scaler import LatentScaler
 from metrics import compute_metrics
 from typing import Optional
@@ -79,6 +80,7 @@ def log_vital_signs(
     epoch: int,
     grad_norm: Optional[float] = None,
     log_to_wandb: bool = True,
+    train_vae_only: bool = False,
 ):
     """
     Log comprehensive vital signs for VAE-Diffusion system health monitoring.
@@ -118,12 +120,13 @@ def log_vital_signs(
         latent_std = 0.0
 
     # 2. Latent Distribution Health
-    if model.scaler is not None and z is not None:
+    if model.scaler is not None and z is not None and model.scaler.is_fitted:
         # Get scaled latents (what diffusion model sees)
         z_scaled = model.scaler.transform(z)
         scaled_mean = z_scaled.mean().item()
         scaled_std = z_scaled.std().item()
     else:
+        # Scaler not fitted yet (during VAE warmup) - use raw latent stats
         scaled_mean = latent_mean
         scaled_std = latent_std
 
@@ -139,7 +142,8 @@ def log_vital_signs(
 
     # 4. Task-Specific Metrics (Null Prediction Health)
     # Calculate null prediction rate (expensive, so sample)
-    if step % 100 == 0:  # Every 100 steps to save compute
+    # Skip during VAE warmup since diffusion isn't trained yet
+    if step % 100 == 0 and not train_vae_only:  # Every 100 steps to save compute
         with torch.no_grad():
             # Quick inference on a small sample
             sample_size = min(4, len(batch["answer_input_ids"]))
@@ -261,8 +265,12 @@ def check_kill_signals(logs: dict, step: int, epoch: int):
         )
 
     # Gradient Health Checks
-    if logs["vital/grad_norm"] > 10.0:
-        warnings.append(f"🚨 GRADIENT EXPLOSION: Norm {logs['vital/grad_norm']:.2f} > 10.0")
+    # Use higher threshold during warmup (epoch 0) when gradients are naturally larger
+    grad_threshold = 100.0 if epoch == 0 else 10.0
+    if logs["vital/grad_norm"] > grad_threshold:
+        warnings.append(
+            f"🚨 GRADIENT EXPLOSION: Norm {logs['vital/grad_norm']:.2f} > {grad_threshold}"
+        )
     elif logs["vital/grad_norm"] < 1e-4 and logs["vital/grad_norm"] > 0.0:
         warnings.append(f"🚨 VANISHING GRADIENTS: Norm {logs['vital/grad_norm']:.6f} < 1e-4")
 
@@ -476,6 +484,7 @@ def train_step(
             global_step,
             epoch,
             grad_norm=current_grad_norm,
+            train_vae_only=train_vae_only,
         )
 
         # Log token accuracy if VAE is active
@@ -586,6 +595,7 @@ def validate(
                 global_step + batch_idx,
                 epoch,
                 log_to_wandb=False,
+                train_vae_only=train_vae_only,
             )
             all_vital_logs.append(v_logs)
 
