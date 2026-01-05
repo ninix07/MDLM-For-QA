@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 from models.vae import SequenceVAE
 from metrics import compute_metrics
 from data.dataset import SQuAD2Dataset
-from config import ModelConfig as modelconfig
+from config import get_config
 from tqdm import tqdm
 
 def test_vae_reconstruction():
@@ -30,8 +30,9 @@ def test_vae_reconstruction():
     print("=== Testing VAE Reconstruction Quality on Dataset ===")
     
     # Setup
+    config = get_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(modelconfig.base_encoder)
+    tokenizer = AutoTokenizer.from_pretrained(config.model.base_encoder)
     
     # Add null token
     null_token = "<NULL_ANS>"
@@ -39,13 +40,14 @@ def test_vae_reconstruction():
         tokenizer.add_special_tokens({"additional_special_tokens": [null_token]})
     
     # Create VAE
+    # Match architecture from models/latent_diffusion.py
     vae = SequenceVAE(
         vocab_size=len(tokenizer),
         embedding_dim=768,
-        latent_dim=128,
-        num_layers=4,
-        num_heads=8,
-        dropout=0.1,
+        latent_dim=config.model.vae_latent_dim,
+        num_layers=6,  # Fixed: Match training configuration (was 4)
+        num_heads=12,  # Fixed: Match training configuration (was 8)
+        dropout=config.model.dropout,
         pad_token_id=tokenizer.pad_token_id,
         latent_seq_len=8,  # Match new bottleneck architecture
     ).to(device)
@@ -84,11 +86,11 @@ def test_vae_reconstruction():
     # Load dataset
     print("Loading dataset...")
     dataset = SQuAD2Dataset(
-        data_path="data/dev-v2.0.json",
+        data_path=config.dev_file,
         tokenizer=tokenizer,
-        max_context_length=384,
-        max_question_length=64,
-        max_answer_length=64,
+        max_context_length=config.model.max_context_length,
+        max_question_length=config.model.max_question_length,
+        max_answer_length=config.model.max_answer_length,
         null_ans_token=null_token,
     )
     

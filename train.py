@@ -110,7 +110,9 @@ def log_vital_signs(
     # Active latent dimensions (where variance > 0.1)
     z = vae_output.get("z", None)
     if z is not None:
-        latent_variance = z.var(dim=0)  # Variance per dimension
+        # z shape: [batch, seq, dim]
+        # Calculate variance across batch and sequence dimensions to see which feature dims are active
+        latent_variance = z.reshape(-1, z.shape[-1]).var(dim=0)  # [dim]
         active_dims = (latent_variance > 0.1).sum().item()
         latent_mean = z.mean().item()
         latent_std = z.std().item()
@@ -1095,8 +1097,11 @@ def main():
     # Requirement 2: Latent Calibration
     # Fit scaler on training data using the trained VAE
     if args.use_vae:
-        print("\n=== Fitting Latent Scaler ===")
-        latent_scaler.fit(train_loader, model.vae, device)
+        if not latent_scaler.is_fitted:
+            print("\n=== Fitting Latent Scaler ===")
+            latent_scaler.fit(train_loader, model.vae, device)
+        else:
+            print("\n=== Latent Scaler already fitted (loaded from checkpoint) ===")
 
     # --- Phase 2: Diffusion Training (Frozen VAE) ---
     print("\n=== Starting Diffusion Training Phase ===")

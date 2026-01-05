@@ -91,6 +91,16 @@ class DDPMSampler:
 class DDIMSampler:
     """DDIM sampling for faster inference."""
 
+    @property
+    def num_inference_steps(self) -> int:
+        return self._num_inference_steps
+
+    @num_inference_steps.setter
+    def num_inference_steps(self, value: int):
+        self._num_inference_steps = value
+        step_ratio = self.scheduler.num_timesteps // value
+        self.timesteps = list(range(0, self.scheduler.num_timesteps, step_ratio))[::-1]
+
     def __init__(
         self,
         scheduler: NoiseScheduler,
@@ -99,12 +109,12 @@ class DDIMSampler:
         prediction_type: str = "epsilon",
     ):
         self.scheduler = scheduler
-        self.num_inference_steps = num_inference_steps
+        self._num_inference_steps = num_inference_steps
         self.eta = eta
         self.prediction_type = prediction_type
 
-        step_ratio = scheduler.num_timesteps // num_inference_steps
-        self.timesteps = list(range(0, scheduler.num_timesteps, step_ratio))[::-1]
+        # Initialize timesteps via setter
+        self.num_inference_steps = num_inference_steps
 
     @torch.no_grad()
     def sample(
