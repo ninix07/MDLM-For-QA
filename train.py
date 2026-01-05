@@ -109,13 +109,31 @@ def log_vital_signs(
 
     # Active latent dimensions (where variance > 0.1)
     z = vae_output.get("z", None)
+    latent_mask = vae_output.get("latent_mask", None)
+    
     if z is not None:
         # z shape: [batch, seq, dim]
-        # Calculate variance across batch and sequence dimensions to see which feature dims are active
-        latent_variance = z.reshape(-1, z.shape[-1]).var(dim=0)  # [dim]
-        active_dims = (latent_variance > 0.1).sum().item()
-        latent_mean = z.mean().item()
-        latent_std = z.std().item()
+        if latent_mask is not None:
+            mask_bool = latent_mask.bool()
+            z_valid = z[mask_bool] # [num_valid, dim]
+            
+            if z_valid.numel() > 0:
+                # Calculate variance across valid tokens only
+                latent_variance = z_valid.var(dim=0)
+                active_dims = (latent_variance > 0.1).sum().item()
+                latent_mean = z_valid.mean().item()
+                latent_std = z_valid.std().item()
+            else:
+                # Fallback if everything is masked (unlikely)
+                active_dims = 0
+                latent_mean = 0.0
+                latent_std = 0.0
+        else:
+            # Fallback to unmasked calculation
+            latent_variance = z.reshape(-1, z.shape[-1]).var(dim=0)  # [dim]
+            active_dims = (latent_variance > 0.1).sum().item()
+            latent_mean = z.mean().item()
+            latent_std = z.std().item()
     else:
         active_dims = 0
         latent_mean = 0.0
@@ -125,8 +143,25 @@ def log_vital_signs(
     if model.scaler is not None and z is not None and model.scaler.is_fitted:
         # Get scaled latents (what diffusion model sees)
         z_scaled = model.scaler.transform(z)
-        scaled_mean = z_scaled.mean().item()
-        scaled_std = z_scaled.std().item()
+        
+        # Filter out padding if mask is available
+        latent_mask = vae_output.get("latent_mask", None)
+        if latent_mask is not None:
+            # latent_mask: [batch, seq_len]
+            # z_scaled: [batch, seq_len, dim]
+            mask_bool = latent_mask.bool()
+            # Flatten batch and seq dimensions for masking
+            z_valid = z_scaled[mask_bool] # [num_valid_tokens, dim]
+            
+            if z_valid.numel() > 0:
+                scaled_mean = z_valid.mean().item()
+                scaled_std = z_valid.std().item()
+            else:
+                scaled_mean = 0.0
+                scaled_std = 0.0
+        else:
+            scaled_mean = z_scaled.mean().item()
+            scaled_std = z_scaled.std().item()
     else:
         # Scaler not fitted yet (during VAE warmup) - use raw latent stats
         scaled_mean = latent_mean
@@ -465,6 +500,7 @@ def train_step(
         "z": outputs.get("z", None),
         "mean": outputs.get("mean", None),
         "logvar": outputs.get("logvar", None),
+        "latent_mask": outputs.get("latent_mask", None),
     }
 
     diffusion_output = {
@@ -580,6 +616,7 @@ def validate(
             "z": outputs.get("z", None),
             "mean": outputs.get("mean", None),
             "logvar": outputs.get("logvar", None),
+            "latent_mask": outputs.get("latent_mask", None),
         }
 
         diffusion_output = {

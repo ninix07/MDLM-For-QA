@@ -441,6 +441,7 @@ class SequenceVAE(nn.Module):
             "z": z,
             "mean": mean,
             "logvar": logvar,
+            "latent_mask": latent_mask,
         }
 
     def get_latent(

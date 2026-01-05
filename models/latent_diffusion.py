@@ -242,6 +242,8 @@ class LatentDiffusionQA(nn.Module):
                     ret["logvar"] = vae_output["logvar"]
                 if "z" in vae_output:
                     ret["z"] = vae_output["z"]
+                if "latent_mask" in vae_output:
+                    ret["latent_mask"] = vae_output["latent_mask"]
                 return ret
 
         # FIX: Reuse mean from VAE loss computation instead of re-encoding
@@ -421,6 +423,10 @@ class LatentDiffusionQA(nn.Module):
         if "mean" in vae_output:
             ret["mean"] = vae_output["mean"]
             ret["logvar"] = vae_output["logvar"]
+        
+        # Ensure latent_mask is always returned if available
+        # (It is computed as 'latent_mask' variable in this function)
+        ret["latent_mask"] = latent_mask
 
         return ret
 
