@@ -110,6 +110,7 @@ class LatentDiffusionQA(nn.Module):
                 pretrained_embeddings=pretrained_embeddings,  # CRITICAL: Use pretrained embeddings!
                 pad_token_id=self.pad_token_id,
                 latent_seq_len=self._latent_seq_len,
+                max_seq_len=max_answer_len,
             )
             # FIX: Update latent_seq_len from VAE to ensure consistency
             self._latent_seq_len = self.vae.latent_seq_len
@@ -138,10 +139,19 @@ class LatentDiffusionQA(nn.Module):
     def get_null_ans_embedding(self, device: torch.device) -> torch.Tensor:
         """Get or compute the null answer embedding."""
         if self._null_ans_embedding is None or self._null_ans_embedding.device != device:
-            null_ids = torch.tensor([[self.null_ans_token_id]], device=device)
+            # Create a full-length sequence: [NULL_ANS, PAD, PAD, ...]
+            # This ensures consistent downsampling behavior in the VAE (vs single token)
+            null_ids = torch.full((1, self.max_answer_len), self.pad_token_id, device=device)
+            null_ids[0, 0] = self.null_ans_token_id
+            
+            # Create attention mask (1 for NULL, 0 for PAD)
+            null_mask = torch.zeros((1, self.max_answer_len), device=device)
+            null_mask[0, 0] = 1
+            
             if self.use_vae:
                 with torch.no_grad():
-                    null_emb, _ = self.vae.get_latent(null_ids, use_mean=True)
+                    # Pass mask so VAE can handle it if needed (though get_latent uses it mainly for latent_mask)
+                    null_emb, _ = self.vae.get_latent(null_ids, attention_mask=null_mask, use_mean=True)
             else:
                 # EmbeddingBridge.encode returns 3D tensor directly
                 null_emb = self.vae.encode(null_ids)
@@ -223,7 +233,17 @@ class LatentDiffusionQA(nn.Module):
         vae_output = {}
 
         if self.use_vae:
-            vae_output = self.vae.loss(answer_ids, answer_mask, kl_weight=kl_weight)
+            # Optimize: Skip reconstruction during diffusion training (when VAE is frozen)
+            # train_vae_only=True -> Phase 1 (Warmup) -> compute_recon=True
+            # train_vae_only=False -> Phase 2 (Diffusion) -> compute_recon=False
+            compute_recon = train_vae_only
+            
+            vae_output = self.vae.loss(
+                answer_ids, 
+                answer_mask, 
+                kl_weight=kl_weight, 
+                compute_recon=compute_recon
+            )
             vae_loss = vae_output["loss"]
             recon_loss = vae_output.get("recon_loss", torch.tensor(0.0, device=answer_ids.device))
             kl_loss = vae_output.get("kl_loss", torch.tensor(0.0, device=answer_ids.device))
@@ -380,15 +400,17 @@ class LatentDiffusionQA(nn.Module):
             if self.scaler is not None:
                 null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
 
-            # FIX: Use Cosine Similarity properly
-            pred_mean = pred_x0.mean(dim=1)  # [batch, dim]
-            null_mean = null_emb.mean(dim=0)  # [dim]
+            # FIX: Use Cosine Similarity on FLATTENED latents for stricter structural matching
+            # Mean pooling destroys temporal information (e.g. [A, B] vs [B, A])
+            # Flatten: [batch, seq, dim] -> [batch, seq*dim]
+            pred_flat = pred_x0.reshape(pred_x0.shape[0], -1)
+            null_flat = null_emb.flatten().unsqueeze(0)  # [1, seq*dim]
 
             # Normalize for cosine similarity
-            pred_norm = F.normalize(pred_mean, p=2, dim=-1)
-            null_norm = F.normalize(null_mean.unsqueeze(0), p=2, dim=-1)
+            pred_norm = F.normalize(pred_flat, p=2, dim=-1)
+            null_norm = F.normalize(null_flat, p=2, dim=-1)
 
-            # Cosine similarity: high value means prediction is close to null
+            # Cosine similarity: high value means prediction is structurally close to null
             cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
 
             # Penalty: we want to push AWAY from null for answerable questions
@@ -508,11 +530,20 @@ class LatentDiffusionQA(nn.Module):
             null_norm_ref = null_raw
 
         # Compare normalized generated z_0 with normalized reference
-        z_pooled = z_0.mean(dim=1)
-        null_pooled = null_norm_ref.mean(dim=0)
+        # FIX: Use FLATTENED cosine similarity to match training penalty logic
+        # z_0: [batch, seq, dim] -> [batch, seq*dim]
+        # null_norm_ref: [seq, dim] -> [1, seq*dim]
+        
+        batch_size = z_0.shape[0]
+        z_flat = z_0.reshape(batch_size, -1)
+        
+        # null_norm_ref comes from get_null_ans_embedding which returns [seq, dim]
+        # We flatten it and unsqueeze for broadcasting
+        null_flat = null_norm_ref.flatten().unsqueeze(0)
 
-        z_vec = F.normalize(z_pooled, p=2, dim=-1)
-        n_vec = F.normalize(null_pooled.unsqueeze(0), p=2, dim=-1)
+        z_vec = F.normalize(z_flat, p=2, dim=-1)
+        n_vec = F.normalize(null_flat, p=2, dim=-1)
+        
         null_similarity = (z_vec * n_vec).sum(dim=-1)
 
         is_null = null_similarity > null_threshold

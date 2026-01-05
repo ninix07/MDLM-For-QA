@@ -253,7 +253,10 @@ class GaussianDiffusion(nn.Module):
             mask = mask.unsqueeze(-1).float()
             loss = F.mse_loss(model_output, target, reduction="none")
             # Apply weight and mask
-            loss = (loss * mse_weight * mask).sum() / mask.sum().clamp(min=1)
+            # mask.sum() counts valid tokens, but loss sum includes latent_dim
+            # We must divide by (valid_tokens * latent_dim) to get MSE per element
+            num_valid_elements = mask.sum() * model_output.shape[-1]
+            loss = (loss * mse_weight * mask).sum() / num_valid_elements.clamp(min=1.0)
         else:
             loss = (F.mse_loss(model_output, target, reduction="none") * mse_weight).mean()
 

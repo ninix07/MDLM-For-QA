@@ -128,7 +128,8 @@ class SequenceVAE(nn.Module):
         dropout: float = 0.1,
         pretrained_embeddings: Optional[nn.Embedding] = None,
         pad_token_id: int = 0,
-        latent_seq_len: int = 8,
+        latent_seq_len: int = 16,
+        max_seq_len: int = 64,
     ):
         super().__init__()
 
@@ -137,6 +138,15 @@ class SequenceVAE(nn.Module):
         self.latent_dim = latent_dim
         self.pad_token_id = pad_token_id
         self.latent_seq_len = latent_seq_len
+        self.max_seq_len = max_seq_len
+
+        # Calculate stride for downsampling/upsampling
+        # Ensure it's an integer and divides evenly
+        if max_seq_len % latent_seq_len != 0:
+            raise ValueError(
+                f"max_seq_len ({max_seq_len}) must be divisible by latent_seq_len ({latent_seq_len})"
+            )
+        self.stride = max_seq_len // latent_seq_len
 
         # Embeddings
         # IMPORTANT: Create our own embedding layer and COPY weights, don't share reference
@@ -197,23 +207,23 @@ class SequenceVAE(nn.Module):
         # BUG #13 FIX: Transposed convolution for learned upsampling
         # Instead of repeat_interleave (which creates identical representations),
         # ConvTranspose1d learns different transformations for each output position
-        # kernel_size = stride = max_seq_len / latent_seq_len (e.g., 64/16 = 4)
+        # kernel_size = stride = max_seq_len / latent_seq_len (calculated dynamically)
         self.upsample_conv = nn.ConvTranspose1d(
             in_channels=embedding_dim,
             out_channels=embedding_dim,
-            kernel_size=4,
-            stride=4,
+            kernel_size=self.stride,
+            stride=self.stride,
             padding=0,
         )
 
         # BUG #10 FIX: Learned downsampling instead of avg_pool
         # Strided convolution preserves more information than averaging
-        # kernel_size = stride = max_seq_len / latent_seq_len (e.g., 64/16 = 4)
+        # kernel_size = stride = max_seq_len / latent_seq_len
         self.downsample_conv = nn.Conv1d(
             in_channels=embedding_dim,
             out_channels=embedding_dim,
-            kernel_size=4,  # Will be adjusted dynamically if needed
-            stride=4,
+            kernel_size=self.stride,
+            stride=self.stride,
             padding=0,
         )
 
@@ -372,10 +382,38 @@ class SequenceVAE(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         kl_weight: float = 0.1,
+        compute_recon: bool = True,
     ) -> Dict[str, torch.Tensor]:
         z, mean, logvar, latent_mask = self.encode(
             input_ids.contiguous(), attention_mask.contiguous()
         )
+        
+        # KL loss (per position, then averaged)
+        # FIX Bug 8: Apply latent_mask to KL computation to exclude padded positions
+        kl_per_pos = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())  # [batch, seq, dim]
+
+        if latent_mask is not None:
+            # latent_mask: [batch, seq], 1=valid, 0=pad
+            # Expand to match kl_per_pos shape
+            mask_expanded = latent_mask.unsqueeze(-1)  # [batch, seq, 1]
+            kl_masked = kl_per_pos * mask_expanded
+            num_valid = mask_expanded.sum().clamp(min=1.0)
+            kl_loss = kl_masked.sum() / num_valid
+        else:
+            kl_loss = kl_per_pos.mean()
+
+        if not compute_recon:
+            # Skip expensive decoding if not needed
+            return {
+                "loss": kl_weight * kl_loss,
+                "recon_loss": torch.tensor(0.0, device=z.device),
+                "kl_loss": kl_loss,
+                "z": z,
+                "mean": mean,
+                "logvar": logvar,
+                "latent_mask": latent_mask,
+            }
+
         decoded = self.decode(z)
 
         # Memory-efficient reconstruction loss using chunked computation
