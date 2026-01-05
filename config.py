@@ -27,6 +27,10 @@ class ModelConfig:
     use_vae: bool = True
     vae_latent_dim: int = 256
 
+    # BUG #9 FIX: Sequence compression ratio - increased from 8 to 16 for better reconstruction
+    # 64/16 = 4x compression instead of 64/8 = 8x compression
+    latent_seq_len: int = 16  # Was 8, now 16 for less aggressive compression
+
     # Max sequence lengths
     max_context_length: int = 512  # Reverted to 512 (BERT limit)
     max_question_length: int = 64  # Increased from 64 64 is good
@@ -124,6 +128,7 @@ class InferenceConfig:
 @dataclass
 class WandbConfig:
     """Weights & Biases configuration."""
+
     project: str = "mdlm-squad"
     entity: Optional[str] = None
     name: Optional[str] = None

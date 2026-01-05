@@ -46,6 +46,7 @@ class LatentDiffusionQA(nn.Module):
         false_negative_penalty_margin: float = 0.3,
         scaler: Optional[LatentScaler] = None,
         prediction_type: str = "epsilon",
+        latent_seq_len: int = 16,  # BUG #9 FIX: Configurable, default 16 (was hardcoded 8)
     ):
         super().__init__()
 
@@ -71,8 +72,8 @@ class LatentDiffusionQA(nn.Module):
         # Determine actual latent dimension
         actual_latent_dim = latent_dim if use_vae else embedding_dim
 
-        # Get latent_seq_len from config or use default
-        self._latent_seq_len = 8  # Default, will be updated after VAE is created
+        # BUG #9 FIX: Use configurable latent_seq_len instead of hardcoded 8
+        self._latent_seq_len = latent_seq_len  # From parameter, default 16
 
         # Denoiser (initialized with default, will match VAE)
         self.denoiser = ConditionalDenoiser(

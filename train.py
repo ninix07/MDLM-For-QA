@@ -571,9 +571,10 @@ def validate(
         total_loss += outputs["loss"].item()
 
         # Extract VAE and diffusion outputs for monitoring
+        # FIX: Use correct keys - model returns "recon_loss" and "kl_loss", not "vae_*"
         vae_output = {
-            "recon_loss": outputs.get("vae_recon_loss", torch.tensor(0.0)),
-            "kl_loss": outputs.get("vae_kl_loss", torch.tensor(0.0)),
+            "recon_loss": outputs.get("recon_loss", torch.tensor(0.0)),
+            "kl_loss": outputs.get("kl_loss", torch.tensor(0.0)),
             "z": outputs.get("z", None),
             "mean": outputs.get("mean", None),
             "logvar": outputs.get("logvar", None),
@@ -885,6 +886,7 @@ def main():
         false_negative_penalty_margin=config.training.false_negative_penalty_margin,
         scaler=latent_scaler,
         prediction_type=config.diffusion.prediction_type,
+        latent_seq_len=config.model.latent_seq_len,  # BUG #9 FIX: Use config value
     )
     model = model.to(device)  # This now also moves scheduler efficiently
 

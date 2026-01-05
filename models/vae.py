@@ -194,6 +194,44 @@ class SequenceVAE(nn.Module):
         # Add positional encoding for upsampled sequence
         self.pos_encoding = SinusoidalPositionalEncoding(embedding_dim, max_len=512)
 
+        # BUG #13 FIX: Transposed convolution for learned upsampling
+        # Instead of repeat_interleave (which creates identical representations),
+        # ConvTranspose1d learns different transformations for each output position
+        # kernel_size = stride = max_seq_len / latent_seq_len (e.g., 64/16 = 4)
+        self.upsample_conv = nn.ConvTranspose1d(
+            in_channels=embedding_dim,
+            out_channels=embedding_dim,
+            kernel_size=4,
+            stride=4,
+            padding=0,
+        )
+
+        # BUG #10 FIX: Learned downsampling instead of avg_pool
+        # Strided convolution preserves more information than averaging
+        # kernel_size = stride = max_seq_len / latent_seq_len (e.g., 64/16 = 4)
+        self.downsample_conv = nn.Conv1d(
+            in_channels=embedding_dim,
+            out_channels=embedding_dim,
+            kernel_size=4,  # Will be adjusted dynamically if needed
+            stride=4,
+            padding=0,
+        )
+
+        # BUG #11 FIX: Learnable position embeddings for decoder output
+        # These help differentiate repeated positions after repeat_interleave
+        self.output_pos_embed = nn.Parameter(
+            torch.randn(1, 512, embedding_dim) * 0.02  # Max 512 positions
+        )
+
+        # BUG #12 FIX: Output projection to align decoder output with embedding space
+        # Weight tying assumes decoder output is in same space as embeddings, but
+        # after multiple transformer layers the space may have shifted.
+        # This learned projection realigns the spaces for better token prediction.
+        self.output_proj = nn.Linear(embedding_dim, embedding_dim)
+        # Initialize as identity so it starts as a no-op and learns the correction
+        nn.init.eye_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
     def encode(
         self,
         input_ids: torch.Tensor,
@@ -220,11 +258,20 @@ class SequenceVAE(nn.Module):
         encoded = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
 
         # Get latent distribution (per position)
-        # Apply structural bottleneck: average pool sequence across time
-        # [batch, 64, hidden] -> [batch, 8, hidden]
-        encoded_pooled = F.adaptive_avg_pool1d(
-            encoded.transpose(1, 2), self.latent_seq_len
-        ).transpose(1, 2)
+        # BUG #10 FIX: Use learned strided convolution instead of avg_pool
+        # This preserves more positional information than averaging
+        # [batch, 64, hidden] -> [batch, latent_seq_len, hidden]
+        seq_len = encoded.shape[1]
+
+        # Use conv if sequence length matches expected stride, else fallback to adaptive pool
+        if seq_len % self.latent_seq_len == 0:
+            # Strided conv: [B, L, E] -> [B, E, L] -> conv -> [B, E, L'] -> [B, L', E]
+            encoded_pooled = self.downsample_conv(encoded.transpose(1, 2)).transpose(1, 2)
+        else:
+            # Fallback for variable lengths (shouldn't happen with fixed max_answer_len)
+            encoded_pooled = F.adaptive_avg_pool1d(
+                encoded.transpose(1, 2), self.latent_seq_len
+            ).transpose(1, 2)
 
         # 2. Project to latent distribution
         mean = self.to_mean(encoded_pooled)
@@ -270,29 +317,38 @@ class SequenceVAE(nn.Module):
         """
         batch_size, latent_seq_len, _ = z.shape
 
-        # 1. Project to embedding space [batch, 8, latent_dim] -> [batch, 8, embedding_dim]
+        # 1. Project to embedding space [batch, latent_seq_len, latent_dim] -> [batch, latent_seq_len, embedding_dim]
         x = self.upsample(z)
 
-        # 2. Repeat each latent position to match target length
-        # [batch, 8, E] -> [batch, 64, E] by repeating each position 8 times
-        repeat_factor = target_len // latent_seq_len
-        if repeat_factor > 0:
-            x = x.repeat_interleave(repeat_factor, dim=1)
+        # 2. BUG #13 FIX: Use transposed convolution for learned upsampling
+        # Instead of repeat_interleave (identical representations), ConvTranspose1d
+        # learns unique transformations for each output position
+        # [batch, latent_seq_len, E] -> [batch, E, latent_seq_len] -> conv -> [batch, E, target_len] -> [batch, target_len, E]
+        x = self.upsample_conv(x.transpose(1, 2)).transpose(1, 2)
 
-        # If target_len is not divisible by latent_seq_len, pad or truncate
+        # Handle any size mismatch (ConvTranspose might produce slightly different size)
         if x.shape[1] < target_len:
             padding = target_len - x.shape[1]
             x = F.pad(x, (0, 0, 0, padding), value=0)
         elif x.shape[1] > target_len:
             x = x[:, :target_len, :]
 
-        # 3. Add positional encoding
+        # BUG #11 FIX: Add LEARNABLE position embeddings BEFORE sinusoidal encoding
+        # This provides additional position-specific information
+        x = x + self.output_pos_embed[:, :target_len, :]
+
+        # 3. Add sinusoidal positional encoding (complementary to learned embeddings)
         x = self.pos_encoding(x)
 
         # 4. Decode with bidirectional attention
         decoded = self.decoder(x)
         # Apply output normalization to fix semantic mismatch
         decoded = self.output_norm(decoded)
+
+        # BUG #12 FIX: Apply output projection to align with embedding space
+        # This helps the decoder output match the input embedding space for weight tying
+        decoded = self.output_proj(decoded)
+
         return decoded
 
     def forward(
