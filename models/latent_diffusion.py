@@ -169,7 +169,8 @@ class LatentDiffusionQA(nn.Module):
             else:
                 # EmbeddingBridge.encode returns 3D tensor directly
                 null_emb = self.vae.encode(null_ids)
-            self._null_ans_embedding = null_emb.squeeze(0)
+            # FIX: Ensure null embedding is float32 to avoid dtype issues
+            self._null_ans_embedding = null_emb.squeeze(0).float()
         return self._null_ans_embedding
 
     def encode_answer(
@@ -188,6 +189,10 @@ class LatentDiffusionQA(nn.Module):
     ) -> torch.Tensor:
         """Decode latent back to tokens."""
         if self.use_vae:
+            # FIX: Convert to float32 to avoid dtype mismatch with model weights
+            # (z may be in bfloat16 from mixed precision training/inference)
+            z = z.float()
+
             # Use max_answer_len for proper sequence length
             hidden = self.vae.decode(z, target_len=self.max_answer_len)
             # Project hidden to logits using embedding weight tying
@@ -555,7 +560,8 @@ class LatentDiffusionQA(nn.Module):
         # null_norm_ref: [seq, dim] -> [1, seq*dim]
 
         batch_size = z_0.shape[0]
-        z_flat = z_0.reshape(batch_size, -1)
+        # FIX: Convert to float32 for consistent comparison (null_norm_ref is float32)
+        z_flat = z_0.float().reshape(batch_size, -1)
 
         # null_norm_ref comes from get_null_ans_embedding which returns [seq, dim]
         # We flatten it and unsqueeze for broadcasting

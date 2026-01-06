@@ -100,7 +100,11 @@ class LatentScaler:
                 self._warned_unfitted = True
             return z
 
-        z_norm = (z - self.mean) / self.std
+        # FIX: Cast mean/std to match input dtype (handles bfloat16 from mixed precision)
+        mean = self.mean.to(dtype=z.dtype)
+        std = self.std.to(dtype=z.dtype)
+
+        z_norm = (z - mean) / std
 
         # Clipping to prevent extreme outliers from destabilizing diffusion
         z_norm = torch.clamp(z_norm, min=-5.0, max=5.0)
@@ -120,7 +124,11 @@ class LatentScaler:
         if self.mean is None:
             return z_norm
 
-        z = z_norm * self.std + self.mean
+        # FIX: Cast mean/std to match input dtype (handles bfloat16 from mixed precision)
+        mean = self.mean.to(dtype=z_norm.dtype)
+        std = self.std.to(dtype=z_norm.dtype)
+
+        z = z_norm * std + mean
 
         # NOTE: Mask is intentionally NOT applied here
         # Padding is handled downstream by the VAE decoder and tokenizer

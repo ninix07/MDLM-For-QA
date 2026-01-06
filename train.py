@@ -110,13 +110,16 @@ def log_vital_signs(
     # Active latent dimensions (where variance > 0.1)
     z = vae_output.get("z", None)
     latent_mask = vae_output.get("latent_mask", None)
-    
+
     if z is not None:
+        # FIX: Convert to float32 to avoid dtype mismatch from mixed precision
+        z = z.float()
+
         # z shape: [batch, seq, dim]
         if latent_mask is not None:
             mask_bool = latent_mask.bool()
-            z_valid = z[mask_bool] # [num_valid, dim]
-            
+            z_valid = z[mask_bool]  # [num_valid, dim]
+
             if z_valid.numel() > 0:
                 # Calculate variance across valid tokens only
                 latent_variance = z_valid.var(dim=0)
@@ -142,8 +145,9 @@ def log_vital_signs(
     # 2. Latent Distribution Health
     if model.scaler is not None and z is not None and model.scaler.is_fitted:
         # Get scaled latents (what diffusion model sees)
+        # z is already float32 from above
         z_scaled = model.scaler.transform(z)
-        
+
         # Filter out padding if mask is available
         latent_mask = vae_output.get("latent_mask", None)
         if latent_mask is not None:
@@ -151,8 +155,8 @@ def log_vital_signs(
             # z_scaled: [batch, seq_len, dim]
             mask_bool = latent_mask.bool()
             # Flatten batch and seq dimensions for masking
-            z_valid = z_scaled[mask_bool] # [num_valid_tokens, dim]
-            
+            z_valid = z_scaled[mask_bool]  # [num_valid_tokens, dim]
+
             if z_valid.numel() > 0:
                 scaled_mean = z_valid.mean().item()
                 scaled_std = z_valid.std().item()
@@ -359,10 +363,16 @@ def log_token_accuracy(model, batch, vae_output, step: int, log_to_wandb: bool =
 
     # BUG #30 FIX: Use mean for deterministic metrics (z has sampling noise)
     z = vae_output.get("mean", vae_output["z"])
-    decoded = model.vae.decode(z)
-    embed_weight = model.vae.embeddings.weight
-    logits = torch.matmul(decoded, embed_weight.T)
-    pred_ids = logits.argmax(dim=-1)
+
+    # FIX: Convert to float32 to avoid dtype mismatch with model weights
+    # (z may be in bfloat16 from mixed precision training)
+    z = z.float()
+
+    with torch.no_grad():
+        decoded = model.vae.decode(z)
+        embed_weight = model.vae.embeddings.weight
+        logits = torch.matmul(decoded, embed_weight.T)
+        pred_ids = logits.argmax(dim=-1)
 
     # Calculate token-level accuracy (only on non-padding tokens)
     valid_mask = attention_mask.bool()
