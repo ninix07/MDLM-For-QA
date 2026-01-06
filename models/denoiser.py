@@ -38,15 +38,11 @@ class ConditionalDenoiser(nn.Module):
                 param.requires_grad = False
 
         cond_dim = self.condition_encoder.config.hidden_size
-        self.condition_proj = (
-            nn.Linear(cond_dim, d_model) if cond_dim != d_model else nn.Identity()
-        )
+        self.condition_proj = nn.Linear(cond_dim, d_model) if cond_dim != d_model else nn.Identity()
 
         self.time_embed = SinusoidalTimestepEmbedding(d_model)
         self.time_mlp = TimestepMLP(d_model, d_model * 4, d_model)
-        self.input_proj = (
-            nn.Linear(latent_dim, d_model) if latent_dim != d_model else nn.Identity()
-        )
+        self.input_proj = nn.Linear(latent_dim, d_model) if latent_dim != d_model else nn.Identity()
         self.pos_encoding = nn.Parameter(torch.randn(1, max_seq_len, d_model) * 0.02)
 
         self.blocks = nn.ModuleList(
@@ -58,7 +54,10 @@ class ConditionalDenoiser(nn.Module):
 
         self.final_norm = nn.LayerNorm(d_model)
         self.output_proj = nn.Linear(d_model, latent_dim)
-        nn.init.zeros_(self.output_proj.weight)
+        # BUG #23 FIX: Use small normal init instead of zeros
+        # Zero init blocks gradient flow entirely, preventing learning
+        # Small init allows gradients to flow while still starting near zero output
+        nn.init.normal_(self.output_proj.weight, std=0.02)
         nn.init.zeros_(self.output_proj.bias)
 
     def encode_condition(
@@ -81,14 +80,14 @@ class ConditionalDenoiser(nn.Module):
         question_emb = self.condition_proj(question_out)
         condition = torch.cat([question_emb, context_emb], dim=1)
         condition_mask = torch.cat([question_mask, context_mask], dim=1)
-        
+
         # SAFETY CHECK: Ensure mask is never all-zero (all padding)
         # If all tokens are masked, MultiheadAttention produces NaNs.
         # We force the first token to be unmasked if the entire row is masked.
-        all_masked = (condition_mask.sum(dim=1) == 0)
+        all_masked = condition_mask.sum(dim=1) == 0
         if all_masked.any():
             condition_mask[all_masked, 0] = 1
-            
+
         condition_mask = ~condition_mask.bool()
         return condition, condition_mask
 
@@ -118,9 +117,7 @@ class ConditionalDenoiser(nn.Module):
         z_key_mask = ~z_mask.bool() if z_mask is not None else None
 
         for block in self.blocks:
-            x = block(
-                x, condition, t_emb, x_mask=z_key_mask, condition_mask=condition_mask
-            )
+            x = block(x, condition, t_emb, x_mask=z_key_mask, condition_mask=condition_mask)
 
         x = self.final_norm(x)
         noise_pred = self.output_proj(x)
@@ -146,9 +143,7 @@ class ConditionalDenoiser(nn.Module):
         z_key_mask = ~z_mask.bool() if z_mask is not None else None
 
         for block in self.blocks:
-            x = block(
-                x, condition, t_emb, x_mask=z_key_mask, condition_mask=condition_mask
-            )
+            x = block(x, condition, t_emb, x_mask=z_key_mask, condition_mask=condition_mask)
 
         x = self.final_norm(x)
         noise_pred = self.output_proj(x)

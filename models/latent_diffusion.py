@@ -139,19 +139,33 @@ class LatentDiffusionQA(nn.Module):
     def get_null_ans_embedding(self, device: torch.device) -> torch.Tensor:
         """Get or compute the null answer embedding."""
         if self._null_ans_embedding is None or self._null_ans_embedding.device != device:
-            # Create a full-length sequence: [NULL_ANS, PAD, PAD, ...]
-            # This ensures consistent downsampling behavior in the VAE (vs single token)
+            # BUG #29 FIX: Create properly padded null sequence instead of single token
+            # The null answer in training data is [<s>, <NULL_ANS>, </s>, <pad>...]
+            # We must encode the same structure to get a matching latent
             null_ids = torch.full((1, self.max_answer_len), self.pad_token_id, device=device)
-            null_ids[0, 0] = self.null_ans_token_id
-            
-            # Create attention mask (1 for NULL, 0 for PAD)
+
+            # Get special token IDs (handle different tokenizer conventions)
+            bos_id = getattr(self.tokenizer, "bos_token_id", None) or getattr(
+                self.tokenizer, "cls_token_id", None
+            )
+            eos_id = getattr(self.tokenizer, "eos_token_id", None) or getattr(
+                self.tokenizer, "sep_token_id", None
+            )
+
+            # Build: [BOS/CLS, NULL_ANS, EOS/SEP, PAD, PAD, ...]
+            if bos_id is not None:
+                null_ids[0, 0] = bos_id
+            null_ids[0, 1] = self.null_ans_token_id
+            if eos_id is not None:
+                null_ids[0, 2] = eos_id
+
+            # Create attention mask: 1 for valid tokens, 0 for padding
             null_mask = torch.zeros((1, self.max_answer_len), device=device)
-            null_mask[0, 0] = 1
-            
+            null_mask[0, :3] = 1  # First 3 tokens are valid (BOS, NULL_ANS, EOS)
+
             if self.use_vae:
                 with torch.no_grad():
-                    # Pass mask so VAE can handle it if needed (though get_latent uses it mainly for latent_mask)
-                    null_emb, _ = self.vae.get_latent(null_ids, attention_mask=null_mask, use_mean=True)
+                    null_emb, _ = self.vae.get_latent(null_ids, null_mask, use_mean=True)
             else:
                 # EmbeddingBridge.encode returns 3D tensor directly
                 null_emb = self.vae.encode(null_ids)
@@ -237,12 +251,9 @@ class LatentDiffusionQA(nn.Module):
             # train_vae_only=True -> Phase 1 (Warmup) -> compute_recon=True
             # train_vae_only=False -> Phase 2 (Diffusion) -> compute_recon=False
             compute_recon = train_vae_only
-            
+
             vae_output = self.vae.loss(
-                answer_ids, 
-                answer_mask, 
-                kl_weight=kl_weight, 
-                compute_recon=compute_recon
+                answer_ids, answer_mask, kl_weight=kl_weight, compute_recon=compute_recon
             )
             vae_loss = vae_output["loss"]
             recon_loss = vae_output.get("recon_loss", torch.tensor(0.0, device=answer_ids.device))
@@ -343,6 +354,15 @@ class LatentDiffusionQA(nn.Module):
         # BERT: [CLS, <NULL_ANS>, SEP, <pad>...] -> Index 1 is NULL_ANS
         is_unanswerable = answer_ids[:, 1] == self.null_ans_token_id
         is_answerable = ~is_unanswerable
+
+        # BUG #27 FIX: Force latent_mask to 1 for unanswerable questions
+        # Without this, the model only learns to predict the first NULL token, leaving the
+        # remaining latent positions (which should be PAD latents) completely unconstrained.
+        # This causes garbage in the tail, corrupting null_similarity computation.
+        # By forcing mask=1, the model learns to predict "silence" (PAD latents) for the entire sequence.
+        if is_unanswerable.any():
+            latent_mask = latent_mask.clone()  # Avoid mutating original
+            latent_mask[is_unanswerable] = 1.0
 
         # Requirement 3: False Negative Penalty
         # Penalize if the model predicts "null" (or close to it) for answerable questions.
@@ -445,7 +465,7 @@ class LatentDiffusionQA(nn.Module):
         if "mean" in vae_output:
             ret["mean"] = vae_output["mean"]
             ret["logvar"] = vae_output["logvar"]
-        
+
         # Ensure latent_mask is always returned if available
         # (It is computed as 'latent_mask' variable in this function)
         ret["latent_mask"] = latent_mask
@@ -533,17 +553,17 @@ class LatentDiffusionQA(nn.Module):
         # FIX: Use FLATTENED cosine similarity to match training penalty logic
         # z_0: [batch, seq, dim] -> [batch, seq*dim]
         # null_norm_ref: [seq, dim] -> [1, seq*dim]
-        
+
         batch_size = z_0.shape[0]
         z_flat = z_0.reshape(batch_size, -1)
-        
+
         # null_norm_ref comes from get_null_ans_embedding which returns [seq, dim]
         # We flatten it and unsqueeze for broadcasting
         null_flat = null_norm_ref.flatten().unsqueeze(0)
 
         z_vec = F.normalize(z_flat, p=2, dim=-1)
         n_vec = F.normalize(null_flat, p=2, dim=-1)
-        
+
         null_similarity = (z_vec * n_vec).sum(dim=-1)
 
         is_null = null_similarity > null_threshold
@@ -586,7 +606,9 @@ class LatentDiffusionQA(nn.Module):
             row = row[1:] if len(row) > 1 else row
             stop_idx = len(row)
             for idx, tid in enumerate(row):
-                if tid == sep_id or tid == pad_id:
+                # BUG #28 FIX: Add null_ans_token_id as a stop token
+                # This prevents garbage after <NULL_ANS> from being decoded
+                if tid == sep_id or tid == pad_id or tid == self.null_ans_token_id:
                     stop_idx = idx
                     break
             truncated_tokens.append(row[:stop_idx])
@@ -607,4 +629,7 @@ class LatentDiffusionQA(nn.Module):
         super().to(device)
         # Move scheduler tensors to device efficiently
         self.scheduler.to(device)
+
+        if self.scaler is not None:
+            self.scaler.to(device)
         return self

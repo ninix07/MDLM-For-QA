@@ -53,27 +53,26 @@ class DDPMSampler:
             model_output = model(z_t, t_batch, **condition_kwargs)
 
             alpha_bar = self.scheduler.alphas_cumprod[t]
-            
+
             # Derive pred_z0 and pred_epsilon
             if self.prediction_type == "epsilon":
                 pred_epsilon = model_output
                 pred_z0 = (z_t - torch.sqrt(1 - alpha_bar) * pred_epsilon) / torch.sqrt(alpha_bar)
             elif self.prediction_type == "v":
                 pred_z0 = torch.sqrt(alpha_bar) * z_t - torch.sqrt(1 - alpha_bar) * model_output
-                pred_epsilon = torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                pred_epsilon = (
+                    torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                )
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
             # Stability clamping - match scaler range [-5,5]
             pred_z0 = torch.clamp(pred_z0, -5.0, 5.0)
-            
 
             alpha = self.scheduler.alphas[t]
             alpha_bar_prev = self.scheduler.alphas_cumprod_prev[t]
 
-            coef1 = (
-                torch.sqrt(alpha_bar_prev) * self.scheduler.betas[t] / (1 - alpha_bar)
-            )
+            coef1 = torch.sqrt(alpha_bar_prev) * self.scheduler.betas[t] / (1 - alpha_bar)
             coef2 = torch.sqrt(alpha) * (1 - alpha_bar_prev) / (1 - alpha_bar)
             mean = coef1 * pred_z0 + coef2 * z_t
 
@@ -166,17 +165,17 @@ class DDIMSampler:
                 pred_z0 = (z_t - torch.sqrt(1 - alpha_bar) * pred_epsilon) / torch.sqrt(alpha_bar)
             elif self.prediction_type == "v":
                 pred_z0 = torch.sqrt(alpha_bar) * z_t - torch.sqrt(1 - alpha_bar) * model_output
-                pred_epsilon = torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                pred_epsilon = (
+                    torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                )
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
             if clip_sample:
-                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0) # Match the scaler!
+                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0)  # Match the scaler!
 
             sigma = self.eta * torch.sqrt(
-                (1 - alpha_bar_prev)
-                / (1 - alpha_bar)
-                * (1 - alpha_bar / alpha_bar_prev)
+                (1 - alpha_bar_prev) / (1 - alpha_bar) * (1 - alpha_bar / alpha_bar_prev)
             )
 
             dir_xt = torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_epsilon
@@ -231,30 +230,18 @@ class CachedDDIMSampler:
         batch_size = shape[0]
         z_t = torch.randn(shape, device=device)
 
-        # FIX Bug 5: Clear cached unconditional to avoid stale values across calls
-        if hasattr(self, "_cached_uncond"):
-            delattr(self, "_cached_uncond")
-
         # Encode condition
         condition, condition_mask = model.encode_condition(
             context_ids, context_mask, question_ids, question_mask
         )
 
         # CFG Prep: Encode unconditional if needed
+        # BUG #24 FIX: Always recompute unconditional to avoid stale cache issues
         is_cfg = guidance_scale != 1.0 and uncond_context_ids is not None
         if is_cfg:
-            # Cache unconditional condition to avoid redundant BERT runs
-            # The unconditional input is usually constant (PAD tokens)
-            if (not hasattr(self, "_cached_uncond") or 
-                self._cached_uncond[0].shape[0] != batch_size or
-                self._cached_uncond[0].device != device):
-                
-                uncond_condition, uncond_condition_mask = model.encode_condition(
-                    uncond_context_ids, uncond_context_mask, uncond_question_ids, uncond_question_mask
-                )
-                self._cached_uncond = (uncond_condition, uncond_condition_mask)
-            else:
-                uncond_condition, uncond_condition_mask = self._cached_uncond
+            uncond_condition, uncond_condition_mask = model.encode_condition(
+                uncond_context_ids, uncond_context_mask, uncond_question_ids, uncond_question_mask
+            )
 
             # Concatenate for batch processing [2*B, seq, dim]
             condition = torch.cat([condition, uncond_condition])
@@ -264,6 +251,10 @@ class CachedDDIMSampler:
         if show_progress:
             timesteps = tqdm(timesteps, desc="DDIM Sampling")
 
+        # BUG #22 FIX: Create z_mask for inference (all positions valid, no padding)
+        # This ensures consistent behavior between training (with mask) and inference
+        z_mask = torch.ones(batch_size, shape[1], device=device)
+
         for i, t in enumerate(timesteps):
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
 
@@ -271,17 +262,21 @@ class CachedDDIMSampler:
                 # Expand z and t for dual-pass [2*B, ...]
                 z_in = torch.cat([z_t, z_t])
                 t_in = torch.cat([t_batch, t_batch])
-                
+                # BUG #22 FIX: Expand z_mask for CFG
+                z_mask_in = torch.cat([z_mask, z_mask])
+
                 model_output_all = model.forward_with_cached_condition(
-                    z_in, t_in, condition, condition_mask
+                    z_in, t_in, condition, condition_mask, z_mask=z_mask_in
                 )
-                
+
                 # Split and apply CFG formula to raw model output
                 model_output_cond, model_output_uncond = model_output_all.chunk(2)
-                model_output = model_output_uncond + guidance_scale * (model_output_cond - model_output_uncond)
+                model_output = model_output_uncond + guidance_scale * (
+                    model_output_cond - model_output_uncond
+                )
             else:
                 model_output = model.forward_with_cached_condition(
-                    z_t, t_batch, condition, condition_mask
+                    z_t, t_batch, condition, condition_mask, z_mask=z_mask
                 )
 
             alpha_bar = self.scheduler.alphas_cumprod[t]
@@ -296,20 +291,22 @@ class CachedDDIMSampler:
             # Derive pred_z0 and pred_epsilon
             if self.prediction_type == "epsilon":
                 pred_epsilon = model_output
-                pred_z0 = (z_t - torch.sqrt(1 - alpha_bar) * pred_epsilon) / torch.sqrt(alpha_bar.clamp(min=1e-8))
+                pred_z0 = (z_t - torch.sqrt(1 - alpha_bar) * pred_epsilon) / torch.sqrt(
+                    alpha_bar.clamp(min=1e-8)
+                )
             elif self.prediction_type == "v":
                 pred_z0 = torch.sqrt(alpha_bar) * z_t - torch.sqrt(1 - alpha_bar) * model_output
-                pred_epsilon = torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                pred_epsilon = (
+                    torch.sqrt(alpha_bar) * model_output + torch.sqrt(1 - alpha_bar) * z_t
+                )
             else:
                 raise ValueError(f"Unknown prediction type: {self.prediction_type}")
 
             if clip_sample:
-                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0) # Match the scaler!
+                pred_z0 = torch.clamp(pred_z0, -5.0, 5.0)  # Match the scaler!
 
             sigma = self.eta * torch.sqrt(
-                (1 - alpha_bar_prev)
-                / (1 - alpha_bar)
-                * (1 - alpha_bar / alpha_bar_prev)
+                (1 - alpha_bar_prev) / (1 - alpha_bar) * (1 - alpha_bar / alpha_bar_prev)
             )
 
             dir_xt = torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_epsilon

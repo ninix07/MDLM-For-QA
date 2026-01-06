@@ -252,6 +252,9 @@ def log_vital_signs(
         "vital/valid_tokens": valid_tokens.item(),
         "vital/total_tokens": total_tokens,
         "vital/valid_token_ratio": valid_tokens.float() / total_tokens,
+        "vital/scaler_fitted": (
+            1.0 if (model.scaler is not None and model.scaler.is_fitted) else 0.0
+        ),
     }
 
     # Add task-specific metrics if available
@@ -293,13 +296,27 @@ def check_kill_signals(logs: dict, step: int, epoch: int):
         )
 
     # Latent Distribution Checks
-    if abs(logs["vital/scaled_mean"]) > 0.5:
-        warnings.append(f"🚨 CENTERING ISSUE: Scaled mean {logs['vital/scaled_mean']:.3f} > 0.5")
+    # Check if scaler is fitted (default to True if key missing for backward compatibility)
+    is_scaler_fitted = logs.get("vital/scaler_fitted", 1.0) > 0.5
 
-    if logs["vital/scaled_std"] > 1.5 or logs["vital/scaled_std"] < 0.5:
-        warnings.append(
-            f"🚨 SCALING ISSUE: Scaled std {logs['vital/scaled_std']:.3f} not in [0.5, 1.5]"
-        )
+    if is_scaler_fitted:
+        # Strict checks for fitted scaler (expect N(0,1))
+        if abs(logs["vital/scaled_mean"]) > 0.5:
+            warnings.append(
+                f"🚨 CENTERING ISSUE: Scaled mean {logs['vital/scaled_mean']:.3f} > 0.5"
+            )
+
+        if logs["vital/scaled_std"] > 1.5 or logs["vital/scaled_std"] < 0.5:
+            warnings.append(
+                f"🚨 SCALING ISSUE: Scaled std {logs['vital/scaled_std']:.3f} not in [0.5, 1.5]"
+            )
+    else:
+        # Relaxed checks for raw VAE latents (during warmup)
+        # VAE latents can have smaller variance depending on KL weight
+        if logs["vital/scaled_std"] < 0.05:
+            warnings.append(f"🚨 LATENT COLLAPSE: Raw std {logs['vital/scaled_std']:.4f} < 0.05")
+        elif logs["vital/scaled_std"] > 10.0:
+            warnings.append(f"🚨 LATENT EXPLOSION: Raw std {logs['vital/scaled_std']:.2f} > 10.0")
 
     # Gradient Health Checks
     # Use higher threshold during warmup (epoch 0) when gradients are naturally larger
@@ -340,8 +357,8 @@ def log_token_accuracy(model, batch, vae_output, step: int, log_to_wandb: bool =
     answer_ids = batch["answer_input_ids"].to(device)
     attention_mask = batch["answer_attention_mask"].to(device)
 
-    # Get VAE reconstruction
-    z = vae_output["z"]
+    # BUG #30 FIX: Use mean for deterministic metrics (z has sampling noise)
+    z = vae_output.get("mean", vae_output["z"])
     decoded = model.vae.decode(z)
     embed_weight = model.vae.embeddings.weight
     logits = torch.matmul(decoded, embed_weight.T)

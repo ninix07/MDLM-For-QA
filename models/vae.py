@@ -382,39 +382,15 @@ class SequenceVAE(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         kl_weight: float = 0.1,
-        compute_recon: bool = True,
+        use_mean_for_recon: bool = False,
     ) -> Dict[str, torch.Tensor]:
         z, mean, logvar, latent_mask = self.encode(
             input_ids.contiguous(), attention_mask.contiguous()
         )
-        
-        # KL loss (per position, then averaged)
-        # FIX Bug 8: Apply latent_mask to KL computation to exclude padded positions
-        kl_per_pos = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp())  # [batch, seq, dim]
-
-        if latent_mask is not None:
-            # latent_mask: [batch, seq], 1=valid, 0=pad
-            # Expand to match kl_per_pos shape
-            mask_expanded = latent_mask.unsqueeze(-1)  # [batch, seq, 1]
-            kl_masked = kl_per_pos * mask_expanded
-            num_valid = mask_expanded.sum().clamp(min=1.0)
-            kl_loss = kl_masked.sum() / num_valid
-        else:
-            kl_loss = kl_per_pos.mean()
-
-        if not compute_recon:
-            # Skip expensive decoding if not needed
-            return {
-                "loss": kl_weight * kl_loss,
-                "recon_loss": torch.tensor(0.0, device=z.device),
-                "kl_loss": kl_loss,
-                "z": z,
-                "mean": mean,
-                "logvar": logvar,
-                "latent_mask": latent_mask,
-            }
-
-        decoded = self.decode(z)
+        # BUG #25 FIX: Option to use mean for reconstruction
+        # This aligns VAE training with diffusion (which trains on mean)
+        # Using mean reduces train-inference mismatch when diffusion generates mean-like latents
+        decoded = self.decode(mean if use_mean_for_recon else z)
 
         # Memory-efficient reconstruction loss using chunked computation
         # Instead of computing full [batch, seq, vocab] logits, compute loss per position
