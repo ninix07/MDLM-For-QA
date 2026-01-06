@@ -309,28 +309,31 @@ class LatentDiffusionQA(nn.Module):
                 torch.full((context_ids.shape[0],), cond_dropout_prob, device=context_ids.device)
             ).bool()
 
-            # FIX: Clone masks before modifying to avoid mutating dataloader tensors
-            # This prevents issues with gradient accumulation and debugging
+            # FIX: Clone tensors before modifying to avoid mutating dataloader tensors
+            context_ids = context_ids.clone()
             context_mask = context_mask.clone()
+            question_ids = question_ids.clone()
             question_mask = question_mask.clone()
 
-            # CRITICAL FIX: Refined Dropout
-            # Instead of replacing tokens with PAD (which has learned embedding),
-            # we just zero out the attention mask.
-            # This effectively removes the context from the attention mechanism.
+            # CRITICAL FIX: Must match inference unconditional signal!
+            # During inference, uncond uses ALL PAD tokens with first token mask.
+            # During training, we must do the SAME to avoid train/inference mismatch.
+            #
+            # The old approach (only zeroing mask) still let BERT see original tokens
+            # via self-attention, causing the "unconditional" output to still
+            # contain input-specific information.
 
-            # 1. Set mask to 0 everywhere for dropped samples
+            # 1. Replace ALL token IDs with PAD for dropped samples
+            context_ids[drop_mask] = self.pad_token_id
+            question_ids[drop_mask] = self.pad_token_id
+
+            # 2. Set mask to 0 everywhere for dropped samples
             context_mask[drop_mask] = 0
             question_mask[drop_mask] = 0
 
-            # 2. Set mask to 1 only for the first token (dummy token)
-            # This prevents NaN in attention softmax if all masks are zero
+            # 3. Set mask to 1 only for the first token to prevent NaN in attention
             context_mask[drop_mask, 0] = 1
             question_mask[drop_mask, 0] = 1
-
-            # Note: We don't need to change input_ids to PAD because mask handles it.
-            # But for safety/consistency, we can set them to PAD if we want,
-            # but keeping original IDs with 0 mask is cleaner for "no signal".
 
         # Diffusion training loss
         condition_kwargs = {
