@@ -30,10 +30,16 @@ class LatentScaler:
         """Check if scaler has been fitted."""
         return self.mean is not None and self.std is not None and self.global_scale is not None
 
-    def fit(self, dataloader, vae_model, device):
+    def fit(self, dataloader, vae_model, device, noise_scale: float = 0.1):
         """
         Compute global mean and std of latents from dataloader.
         Optimized to keep data on GPU and reduce CPU-GPU transfers.
+
+        Args:
+            dataloader: DataLoader with training data
+            vae_model: The VAE model to encode latents
+            device: Device to run on
+            noise_scale: Scale of noise to add (matches Bug #40 fix in latent_diffusion.py)
         """
         print("Fitting LatentScaler...")
         vae_model.eval()
@@ -49,8 +55,18 @@ class LatentScaler:
                 answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
                 answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
 
-                # Get mean latent (deterministic) and the downsampled latent mask
-                z, latent_mask = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
+                # BUG #45 FIX: Get both mean and logvar to add noise matching training
+                # During diffusion training, we use mean + 0.1*std*noise (Bug #40 fix)
+                # Scaler should be fitted on the same distribution
+                z_sampled, mean, logvar, latent_mask = vae_model.encode(answer_ids, answer_mask)
+
+                # Add small noise to mean to match diffusion training distribution
+                if noise_scale > 0:
+                    std = torch.exp(0.5 * logvar)
+                    noise = torch.randn_like(mean)
+                    z = mean + noise_scale * std * noise
+                else:
+                    z = mean
 
                 # Mask out padding and compute statistics online
                 mask = latent_mask.bool()
@@ -86,7 +102,11 @@ class LatentScaler:
         # After per-dim normalization, compute the actual global std
         # to ensure the final output has std ≈ 1.0
         print("Computing global scaling factor...")
-        global_std_sum = 0.0
+        # BUG #35 FIX: Use proper variance formula Var = E[x²] - E[x]²
+        # The previous code computed E[x²] (second moment) which overestimates variance
+        # if there's any residual mean shift after per-dim normalization
+        global_mean_sum = 0.0
+        global_sq_sum = 0.0
         global_count = 0
 
         with torch.no_grad():
@@ -94,7 +114,15 @@ class LatentScaler:
                 answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
                 answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
 
-                z, latent_mask = vae_model.get_latent(answer_ids, answer_mask, use_mean=True)
+                # BUG #45 FIX: Use same noise injection as first pass
+                z_sampled, mean, logvar, latent_mask = vae_model.encode(answer_ids, answer_mask)
+
+                if noise_scale > 0:
+                    std = torch.exp(0.5 * logvar)
+                    noise = torch.randn_like(mean)
+                    z = mean + noise_scale * std * noise
+                else:
+                    z = mean
 
                 # Apply per-dim normalization
                 z_norm = (z - self.mean) / self.std
@@ -104,13 +132,17 @@ class LatentScaler:
                 z_valid = z_norm[mask]
 
                 if z_valid.numel() > 0:
-                    # Accumulate variance (not std, to avoid sqrt issues)
-                    global_std_sum += (z_valid**2).sum().item()
+                    # Accumulate for proper variance: Var = E[x²] - E[x]²
+                    global_mean_sum += z_valid.sum().item()
+                    global_sq_sum += (z_valid**2).sum().item()
                     global_count += z_valid.numel()
 
-        # Compute global std after per-dim normalization
+        # Compute global std after per-dim normalization using proper variance formula
         if global_count > 0:
-            global_variance = global_std_sum / global_count
+            global_mean = global_mean_sum / global_count
+            global_variance = (global_sq_sum / global_count) - global_mean**2
+            # Clamp variance to positive value to handle numerical issues
+            global_variance = max(global_variance, 1e-6)
             self.global_scale = torch.tensor(global_variance**0.5, device=device)
         else:
             self.global_scale = torch.tensor(1.0, device=device)

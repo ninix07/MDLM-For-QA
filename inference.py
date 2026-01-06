@@ -26,9 +26,7 @@ class QAInference:
         self.null_threshold = null_threshold
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.model.base_encoder
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.base_encoder)
 
         # Load model
         self.model = LatentDiffusionQA(
@@ -89,6 +87,8 @@ class QAInference:
         question_mask = question_enc["attention_mask"].to(self.device)
 
         # Generate
+        # BUG #44 FIX: Pass guidance_scale from config
+        # Was using default 5.0 instead of configured 1.5
         outputs = self.model.generate(
             context_ids,
             context_mask,
@@ -96,6 +96,7 @@ class QAInference:
             question_mask,
             null_threshold=self.null_threshold,
             show_progress=show_progress,
+            guidance_scale=1.5,  # Match config.inference.guidance_scale
         )
 
         # Decode

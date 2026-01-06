@@ -180,18 +180,17 @@ def evaluate_model(
         context_mask = batch["context_attention_mask"].to(device)
         question_ids = batch["question_input_ids"].to(device)
         question_mask = batch["question_attention_mask"].to(device)
-        qids = (
-            batch["ids"]
-            if "ids" in batch
-            else [str(i) for i in range(len(context_ids))]
-        )
+        qids = batch["ids"] if "ids" in batch else [str(i) for i in range(len(context_ids))]
 
+        # BUG #43 FIX: Pass guidance_scale from config
+        # Was using default 5.0 instead of configured 1.5
         outputs = model.generate(
             context_ids,
             context_mask,
             question_ids,
             question_mask,
             null_threshold=null_threshold,
+            guidance_scale=1.5,  # Match config.inference.guidance_scale
         )
 
         texts = model.decode_tokens_to_text(outputs["tokens"], outputs["is_null"])
@@ -209,7 +208,8 @@ def main():
     parser.add_argument("--data_file", type=str, default="data/dev-v2.0.json")
     parser.add_argument("--output_file", type=str, default="predictions.json")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--null_threshold", type=float, default=0.3)
+    # BUG #46 FIX: Default should match config.inference.null_ans_threshold (0.5)
+    parser.add_argument("--null_threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     # Handle WandB checkpoint
@@ -220,18 +220,24 @@ def main():
         artifact_dir = artifact.download()
         # Assuming the checkpoint file is named 'model.pt' or similar in the artifact
         # We'll look for a .pt file
-        checkpoint_files = [f for f in os.listdir(artifact_dir) if f.endswith(".pt") or f.endswith(".pth") or f.endswith(".bin")]
+        checkpoint_files = [
+            f
+            for f in os.listdir(artifact_dir)
+            if f.endswith(".pt") or f.endswith(".pth") or f.endswith(".bin")
+        ]
         if not checkpoint_files:
-             # If no specific model file found, try using the artifact dir itself if it's a file path or check for standard names
-             # But usually artifacts are directories. Let's assume the user points to the artifact and we find the file.
-             # If the artifact IS the file, download returns the dir containing it.
-             pass
-        
+            # If no specific model file found, try using the artifact dir itself if it's a file path or check for standard names
+            # But usually artifacts are directories. Let's assume the user points to the artifact and we find the file.
+            # If the artifact IS the file, download returns the dir containing it.
+            pass
+
         if checkpoint_files:
             args.checkpoint = os.path.join(artifact_dir, checkpoint_files[0])
             print(f"Using checkpoint file: {args.checkpoint}")
         else:
-             print(f"Warning: No .pt/.pth/.bin file found in artifact. Using provided path as is if valid.")
+            print(
+                f"Warning: No .pt/.pth/.bin file found in artifact. Using provided path as is if valid."
+            )
 
     config = get_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -289,7 +295,9 @@ def main():
     print(f"\nPrediction Statistics:")
     print(f"  Answerable: {num_predicted_answerable}")
     print(f"  Unanswerable: {num_predicted_unanswerable}")
-    print(f"  Ratio (Unanswerable): {num_predicted_unanswerable / (num_predicted_answerable + num_predicted_unanswerable):.2%}")
+    print(
+        f"  Ratio (Unanswerable): {num_predicted_unanswerable / (num_predicted_answerable + num_predicted_unanswerable):.2%}"
+    )
 
     # Compute metrics
     metrics = compute_metrics(predictions, ground_truths, no_answer_probs, args.null_threshold)
@@ -301,13 +309,13 @@ def main():
 
     # Prepare data for metrics
     # ROUGE/BLEU need list of predictions and list of references (list of lists)
-    # We only consider questions that have answers for these metrics usually, 
+    # We only consider questions that have answers for these metrics usually,
     # or we can include all. Standard SQuAD eval doesn't usually do ROUGE/BLEU, but for generation it makes sense.
     # We will compute it on all examples.
-    
+
     metric_preds = []
     metric_refs = []
-    
+
     for qid, pred in predictions.items():
         if qid in ground_truths:
             metric_preds.append(pred)
@@ -318,10 +326,9 @@ def main():
         rouge_results = rouge.compute(predictions=metric_preds, references=metric_refs)
         # BLEU expects references to be list of list of strings
         bleu_results = sacrebleu.compute(predictions=metric_preds, references=metric_refs)
-        
+
         metrics.update(rouge_results)
         metrics["bleu"] = bleu_results["score"]
-
 
     print("\n=== Results ===")
     print(f"Exact Match: {metrics['exact_match']:.2f}")
@@ -331,7 +338,7 @@ def main():
         print(f"HasAns F1: {metrics['has_answer_f1']:.2f}")
     if "no_answer_accuracy" in metrics:
         print(f"NoAns Accuracy: {metrics['no_answer_accuracy']:.2f}")
-    
+
     print(f"ROUGE-1: {metrics.get('rouge1', 0):.2f}")
     print(f"ROUGE-2: {metrics.get('rouge2', 0):.2f}")
     print(f"ROUGE-L: {metrics.get('rougeL', 0):.2f}")

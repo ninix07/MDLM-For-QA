@@ -240,9 +240,10 @@ class GaussianDiffusion(nn.Module):
         if self.prediction_type == "epsilon":
             mse_weight = torch.minimum(torch.ones_like(snr), gamma / snr)
         elif self.prediction_type == "v":
-            # For v-prediction, the natural weight is SNR / (SNR + 1)
-            # Min-SNR weighting for v-prediction: min(SNR, gamma) / (SNR + 1)
-            mse_weight = torch.minimum(snr, torch.full_like(snr, gamma)) / (snr + 1)
+            # BUG #32 FIX: Correct Min-SNR weighting for v-prediction
+            # The previous formula divided by (SNR + 1) which gave near-zero weight to low-t steps
+            # where reconstruction matters most. Now using standard Min-SNR: min(SNR, gamma)
+            mse_weight = torch.minimum(snr, torch.full_like(snr, gamma))
         else:
             mse_weight = torch.ones_like(snr)
 

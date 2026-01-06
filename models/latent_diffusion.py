@@ -285,8 +285,18 @@ class LatentDiffusionQA(nn.Module):
         # FIX: Reuse mean from VAE loss computation instead of re-encoding
         # This ensures consistency and avoids redundant computation
         if self.use_vae and "mean" in vae_output:
-            # Use deterministic mean for diffusion (matches inference behavior)
+            # BUG #40 FIX: Add small noise to mean during training to match VAE distribution
+            # The VAE decoder was trained on z = mean + eps*std (sampled), not just mean.
+            # Training diffusion on pure mean creates a distribution mismatch.
+            # We add scaled noise to approximate the VAE posterior sampling.
             z_0 = vae_output["mean"]
+            if self.training and "logvar" in vae_output:
+                # Add small noise proportional to VAE's learned variance
+                # Scale factor 0.1 keeps noise small but present
+                std = torch.exp(0.5 * vae_output["logvar"])
+                noise = torch.randn_like(z_0)
+                z_0 = z_0 + 0.1 * std * noise
+
             # Recompute latent_mask from answer_mask (downsample to latent_seq_len)
             latent_mask = F.adaptive_max_pool1d(
                 answer_mask.unsqueeze(1).float(), self._latent_seq_len
@@ -412,46 +422,61 @@ class LatentDiffusionQA(nn.Module):
             noise_ans = diff_output["noise"][subset_indices]
             model_output_ans = diff_output["model_output"][subset_indices]
 
-            # Reconstruct z_t (using the same noise/t as in training_loss)
-            z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
+            # BUG #33 FIX: Only compute penalty for low-t samples where pred_x0 is reliable
+            # At high t (e.g., t=900), z_t is almost pure noise and pred_x0 is garbage
+            # This adds noise to the gradient and prevents effective learning
+            # BUG #39 FIX: Increased from 200 to 500 (25% of 2000 timesteps)
+            # With 200, only 10% of samples qualified, often resulting in zero penalty samples
+            low_t_threshold = 500  # Use samples with t < 500 (25% of timesteps)
+            low_t_mask = t_ans < low_t_threshold
 
-            # Predict x_0 using the unified method
-            pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
+            if low_t_mask.sum() > 0:
+                # Filter to only low-t samples
+                z_ans = z_ans[low_t_mask]
+                t_ans = t_ans[low_t_mask]
+                noise_ans = noise_ans[low_t_mask]
+                model_output_ans = model_output_ans[low_t_mask]
 
-            # STABLE NORMALIZATION: Clip pred_x0 to prevent inf values
-            # Latents are typically unit variance, so [-20, 20] is a very safe bound
-            # that prevents overflow during norm calculation.
-            pred_x0 = torch.clamp(pred_x0, -20.0, 20.0)
+                # Reconstruct z_t (using the same noise/t as in training_loss)
+                z_t_ans, _ = self.diffusion.q_sample(z_ans, t_ans, noise_ans)
 
-            # Get null embedding
-            null_emb = self.get_null_ans_embedding(z_0.device)
-            if self.scaler is not None:
-                null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
+                # Predict x_0 using the unified method
+                pred_x0 = self.diffusion.predict_x0(z_t_ans, t_ans, model_output_ans)
 
-            # FIX: Use Cosine Similarity on FLATTENED latents for stricter structural matching
-            # Mean pooling destroys temporal information (e.g. [A, B] vs [B, A])
-            # Flatten: [batch, seq, dim] -> [batch, seq*dim]
-            pred_flat = pred_x0.reshape(pred_x0.shape[0], -1)
-            null_flat = null_emb.flatten().unsqueeze(0)  # [1, seq*dim]
+                # STABLE NORMALIZATION: Clip pred_x0 to prevent inf values
+                # Latents are typically unit variance, so [-20, 20] is a very safe bound
+                # that prevents overflow during norm calculation.
+                pred_x0 = torch.clamp(pred_x0, -20.0, 20.0)
 
-            # Normalize for cosine similarity
-            pred_norm = F.normalize(pred_flat, p=2, dim=-1)
-            null_norm = F.normalize(null_flat, p=2, dim=-1)
+                # Get null embedding
+                null_emb = self.get_null_ans_embedding(z_0.device)
+                if self.scaler is not None:
+                    null_emb = self.scaler.transform(null_emb.unsqueeze(0)).squeeze(0)
 
-            # Cosine similarity: high value means prediction is structurally close to null
-            cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
+                # FIX: Use Cosine Similarity on FLATTENED latents for stricter structural matching
+                # Mean pooling destroys temporal information (e.g. [A, B] vs [B, A])
+                # Flatten: [batch, seq, dim] -> [batch, seq*dim]
+                pred_flat = pred_x0.reshape(pred_x0.shape[0], -1)
+                null_flat = null_emb.flatten().unsqueeze(0)  # [1, seq*dim]
 
-            # Penalty: we want to push AWAY from null for answerable questions
-            # Use hinge loss: Penalty = max(0, cos_sim - margin)
-            # If cos_sim > margin (too close to null), apply penalty
-            margin = self.false_negative_penalty_margin
-            penalty = F.relu(cos_sim - margin).mean()
+                # Normalize for cosine similarity
+                pred_norm = F.normalize(pred_flat, p=2, dim=-1)
+                null_norm = F.normalize(null_flat, p=2, dim=-1)
 
-            penalty_loss = self.false_negative_penalty_weight * penalty
+                # Cosine similarity: high value means prediction is structurally close to null
+                cos_sim = (pred_norm * null_norm).sum(dim=-1)  # [batch]
 
-            # FINAL SAFETY CHECK: Zero out if NaN or Inf
-            if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
-                penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
+                # Penalty: we want to push AWAY from null for answerable questions
+                # Use hinge loss: Penalty = max(0, cos_sim - margin)
+                # If cos_sim > margin (too close to null), apply penalty
+                margin = self.false_negative_penalty_margin
+                penalty = F.relu(cos_sim - margin).mean()
+
+                penalty_loss = self.false_negative_penalty_weight * penalty
+
+                # FINAL SAFETY CHECK: Zero out if NaN or Inf
+                if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
+                    penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
         # Combine losses (penalty already scaled by false_negative_penalty_weight in config)
         # FIX: Only add VAE loss during VAE warmup phase (train_vae_only=True)

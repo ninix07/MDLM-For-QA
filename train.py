@@ -198,6 +198,8 @@ def log_vital_signs(
             try:
                 # Use model.generate for proper null prediction check
                 # We use a reduced number of steps for speed
+                # BUG #42 FIX: Pass guidance_scale and null_threshold from config
+                # Was using defaults (5.0, 0.3) instead of config values (1.5, 0.5)
                 sample_outputs = model.generate(
                     sample_context_ids,
                     sample_context_mask,
@@ -205,6 +207,8 @@ def log_vital_signs(
                     sample_question_mask,
                     num_inference_steps=10,  # Fast check
                     show_progress=False,
+                    guidance_scale=get_config().inference.guidance_scale,
+                    null_threshold=get_config().inference.null_ans_threshold,
                 )
 
                 # Null prediction rate
@@ -692,6 +696,7 @@ def validate(
             else:
                 # Use reduced inference steps for speed (e.g., 20)
 
+                # BUG #38 FIX: Pass null_threshold from config (was using default 0.3 instead of 0.5)
                 gen_outputs = model.generate(
                     context_ids,
                     context_mask,
@@ -700,6 +705,7 @@ def validate(
                     show_progress=False,
                     num_inference_steps=20,
                     guidance_scale=get_config().inference.guidance_scale,
+                    null_threshold=get_config().inference.null_ans_threshold,
                 )
 
             # Decode predictions
@@ -1187,10 +1193,17 @@ def main():
 
         # Re-init scheduler for diffusion phase with its own T_max
         diffusion_steps = steps_per_epoch * args.epochs
+        # BUG #41 FIX: Use appropriate warmup for diffusion phase
+        # The VAE warmup steps may not be optimal for diffusion training
+        # Use 10% of total steps or 1000, whichever is smaller
+        diffusion_warmup_steps = min(1000, diffusion_steps // 10)
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=config.training.warmup_steps,
+            num_warmup_steps=diffusion_warmup_steps,
             num_training_steps=diffusion_steps if diffusion_steps > 0 else 1,
+        )
+        print(
+            f"Diffusion scheduler: {diffusion_warmup_steps} warmup steps, {diffusion_steps} total steps"
         )
 
         # If we resumed, we need to reload the optimizer/scheduler state for the diffusion phase

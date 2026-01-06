@@ -92,8 +92,9 @@ class TrainingConfig:
     answerable_ratio: float = 0.75  # 75% answerable - bias heavily toward finding answers
 
     # False negative penalty (penalize predicting no answer when answerable)
-    # FIX: Reduced from 5.0 to 0.5 - penalty was 5-10x larger than diffusion loss, causing instability
-    false_negative_penalty_weight: float = 0.5
+    # BUG #34 FIX: Reduced from 0.5 to 0.1 - penalty was still dominating diffusion loss
+    # At 0.5, penalty (0.05-0.25) could equal or exceed diffusion loss (0.05-0.2)
+    false_negative_penalty_weight: float = 0.1
     false_negative_penalty_margin: float = 0.3  # Margin for hinge loss
 
     # Checkpointing
@@ -113,7 +114,8 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    guidance_scale: float = 3.0  # Aggressive push away from Null state
+    # BUG #36 FIX: Reduced from 3.0 to 1.5 - high guidance pushes latents out of VAE distribution
+    guidance_scale: float = 1.5
 
     # Null answer threshold
     null_ans_threshold: float = 0.5  # Require higher certainty before abstaining

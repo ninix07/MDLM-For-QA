@@ -201,12 +201,27 @@ class CachedDDIMSampler:
         prediction_type: str = "epsilon",
     ):
         self.scheduler = scheduler
-        self.num_inference_steps = num_inference_steps
+        self._num_inference_steps = num_inference_steps
         self.eta = eta
         self.prediction_type = prediction_type
 
-        step_ratio = scheduler.num_timesteps // num_inference_steps
-        self.timesteps = list(range(0, scheduler.num_timesteps, step_ratio))[::-1]
+        # BUG #37 FIX: Initialize timesteps via helper method
+        self._update_timesteps()
+
+    def _update_timesteps(self):
+        """Recalculate timesteps based on current num_inference_steps."""
+        step_ratio = self.scheduler.num_timesteps // self._num_inference_steps
+        self.timesteps = list(range(0, self.scheduler.num_timesteps, step_ratio))[::-1]
+
+    @property
+    def num_inference_steps(self) -> int:
+        return self._num_inference_steps
+
+    @num_inference_steps.setter
+    def num_inference_steps(self, value: int):
+        """BUG #37 FIX: Update timesteps when num_inference_steps changes."""
+        self._num_inference_steps = value
+        self._update_timesteps()
 
     @torch.no_grad()
     def sample(
