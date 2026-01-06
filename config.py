@@ -92,7 +92,8 @@ class TrainingConfig:
     answerable_ratio: float = 0.75  # 75% answerable - bias heavily toward finding answers
 
     # False negative penalty (penalize predicting no answer when answerable)
-    false_negative_penalty_weight: float = 5.0
+    # FIX: Reduced from 5.0 to 0.5 - penalty was 5-10x larger than diffusion loss, causing instability
+    false_negative_penalty_weight: float = 0.5
     false_negative_penalty_margin: float = 0.3  # Margin for hinge loss
 
     # Checkpointing

@@ -451,7 +451,10 @@ class LatentDiffusionQA(nn.Module):
                 penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
         # Combine losses (penalty already scaled by false_negative_penalty_weight in config)
-        if self.use_vae:
+        # FIX: Only add VAE loss during VAE warmup phase (train_vae_only=True)
+        # During diffusion training (train_vae_only=False), VAE is frozen and vae_loss
+        # only contains KL which would add noise to diffusion gradients
+        if self.use_vae and train_vae_only:
             total_loss = diffusion_loss + (vae_loss * 0.1) + penalty_loss
         else:
             total_loss = diffusion_loss + penalty_loss
