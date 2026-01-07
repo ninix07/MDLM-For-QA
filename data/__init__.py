@@ -1,7 +1,6 @@
 from .dataset import (
     SQuADExample,
     SQuAD2Dataset,
-    BalancedSQuADSampler,
     create_dataloader,
     collate_fn,
 )
@@ -9,7 +8,6 @@ from .dataset import (
 __all__ = [
     "SQuADExample",
     "SQuAD2Dataset",
-    "BalancedSQuADSampler",
     "create_dataloader",
     "collate_fn",
 ]
