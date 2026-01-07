@@ -1210,14 +1210,24 @@ def main():
             f"Diffusion scheduler: {diffusion_warmup_steps} warmup steps, {diffusion_steps} total steps"
         )
 
-        # If we resumed, we need to reload the optimizer/scheduler state for the diffusion phase
-        if args.resume:
+        # BUG #52 FIX: Do NOT reload optimizer/scheduler when starting diffusion phase
+        # The old state was for VAE training with different parameters and LR
+        # We need fresh optimizer/scheduler for diffusion with:
+        #   - Different trainable parameters (frozen VAE)
+        #   - Higher LR (3x)
+        #   - Shorter warmup (1000 steps)
+        # Only reload if explicitly resuming a diffusion checkpoint (not VAE)
+        if args.resume and "diffusion_phase" in args.resume:
             print("Reloading optimizer/scheduler state for diffusion phase...")
             checkpoint = torch.load(args.resume, map_location=device)
             if "optimizer_state_dict" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             if "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"]:
                 scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        else:
+            print(
+                "Starting diffusion phase with fresh optimizer/scheduler (not reloading VAE state)"
+            )
 
         print(
             f"Trainable parameters (Diffusion only): {sum(p.numel() for p in model.parameters() if p.requires_grad):,}"
