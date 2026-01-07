@@ -119,6 +119,9 @@ class DDIMSampler:
 
         # Initialize timesteps via setter
         self.num_inference_steps = num_inference_steps
+        
+        # Stats for logging
+        self.last_stats = {}
 
     @torch.no_grad()
     def sample(
@@ -296,6 +299,16 @@ class CachedDDIMSampler:
 
                 # Split and apply CFG formula to raw model output
                 model_output_cond, model_output_uncond = model_output_all.chunk(2)
+                
+                # BUG #37 FIX: Log CFG noise stats for debugging
+                # Store stats for the LAST timestep (most relevant for final output)
+                if i == len(timesteps) - 1:
+                    self.last_stats = {
+                        "noise_cond_norm": model_output_cond.norm().item() / batch_size,
+                        "noise_uncond_norm": model_output_uncond.norm().item() / batch_size,
+                        "cfg_scale": guidance_scale,
+                    }
+
                 model_output = model_output_uncond + guidance_scale * (
                     model_output_cond - model_output_uncond
                 )

@@ -329,6 +329,11 @@ def log_vital_signs(
     if avg_null_sim is not None:
         vital_logs["vital/null_cosine_sim"] = avg_null_sim
 
+    # BUG #37 FIX: Log CFG stats if available
+    if hasattr(model, "sampler") and hasattr(model.sampler, "last_stats") and model.sampler.last_stats:
+        for k, v in model.sampler.last_stats.items():
+            vital_logs[f"vital/{k}"] = v
+
     # Log to wandb (no explicit step - let wandb auto-increment to avoid step conflicts)
     if log_to_wandb:
         wandb.log(vital_logs)
@@ -1106,7 +1111,10 @@ def main():
                 current_step = global_step
                 # Cyclical KL annealing to prevent posterior collapse
                 current_kl = get_kl_weight(
-                    current_step, total_steps=total_warmup_steps, target_kl=0.01, cycles=4
+                    current_step,
+                    total_steps=total_warmup_steps,
+                    target_kl=config.training.target_kl,
+                    cycles=4,
                 )
 
                 metrics = train_step(

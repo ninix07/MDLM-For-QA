@@ -27,9 +27,9 @@ class ModelConfig:
     use_vae: bool = True
     vae_latent_dim: int = 256
 
-    # BUG #9 FIX: Sequence compression ratio - increased from 8 to 16 for better reconstruction
-    # 64/16 = 4x compression instead of 64/8 = 8x compression
-    latent_seq_len: int = 16  # Was 8, now 16 for less aggressive compression
+    # BUG #9 FIX: Sequence compression ratio - increased from 8 to 32 for better reconstruction
+    # 64/2 = 32 latent tokens (2x compression)
+    latent_seq_len: int = 32  # Increased to 32 for higher resolution reconstruction
 
     # Max sequence lengths
     max_context_length: int = 512  # Reverted to 512 (BERT limit)
@@ -109,6 +109,9 @@ class TrainingConfig:
     # VAE Warmup
     vae_warmup_epochs: int = 40
     vae_patience: int = 5
+    # BUG #36 FIX: Increased target KL from 0.01 to 0.1 to force tighter latent distribution
+    # High KL (~15) means posterior is far from N(0,1), making diffusion hard
+    target_kl: float = 0.1
 
 
 @dataclass
