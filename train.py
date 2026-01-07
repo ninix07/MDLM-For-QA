@@ -559,7 +559,7 @@ def train_step(
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
             grad_scaler.unscale_(optimizer)
-            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm).item()
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), get_config().training.max_grad_norm).item()
             grad_scaler.step(optimizer)
             grad_scaler.update()
         else:
@@ -582,7 +582,7 @@ def train_step(
 
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
-            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm).item()
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), get_config().training.max_grad_norm).item()
             optimizer.step()
         else:
             current_grad_norm = get_grad_norm(model)
