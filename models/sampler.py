@@ -47,10 +47,15 @@ class DDPMSampler:
         # Pre-allocate t_batch tensor to avoid repeated allocations
         t_batch = torch.empty((batch_size,), device=device, dtype=torch.long)
 
+        # BUG #35 FIX: Create z_mask for inference (all positions valid)
+        # Consistent with DDIMSampler and CachedDDIMSampler
+        z_mask = torch.ones(batch_size, shape[1], device=device)
+
         for t in timesteps:
             t_batch.fill_(t)
 
-            model_output = model(z_t, t_batch, **condition_kwargs)
+            # BUG #35 FIX: Pass z_mask to model
+            model_output = model(z_t, t_batch, z_mask=z_mask, **condition_kwargs)
 
             alpha_bar = self.scheduler.alphas_cumprod[t]
 
@@ -146,10 +151,15 @@ class DDIMSampler:
         # Pre-allocate t_batch tensor to avoid repeated allocations
         t_batch = torch.empty((batch_size,), device=device, dtype=torch.long)
 
+        # BUG #32 FIX: Create z_mask for inference (all positions valid)
+        # This ensures consistency with training which passes z_mask to denoiser
+        z_mask = torch.ones(batch_size, shape[1], device=device)
+
         for i, t in enumerate(timesteps):
             t_batch.fill_(t)
 
-            model_output = model(z_t, t_batch, **condition_kwargs)
+            # BUG #32 FIX: Pass z_mask to model
+            model_output = model(z_t, t_batch, z_mask=z_mask, **condition_kwargs)
 
             alpha_bar = self.scheduler.alphas_cumprod[t]
 

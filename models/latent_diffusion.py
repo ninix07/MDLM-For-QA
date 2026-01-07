@@ -47,6 +47,8 @@ class LatentDiffusionQA(nn.Module):
         scaler: Optional[LatentScaler] = None,
         prediction_type: str = "epsilon",
         latent_seq_len: int = 16,  # BUG #9 FIX: Configurable, default 16 (was hardcoded 8)
+        aux_token_loss_weight: float = 0.1,  # Option A: Auxiliary token loss weight
+        aux_token_loss_low_t_threshold: int = 500,  # Only apply for t < threshold
     ):
         super().__init__()
 
@@ -60,6 +62,8 @@ class LatentDiffusionQA(nn.Module):
         self.false_negative_penalty_margin = false_negative_penalty_margin
         self.scaler = scaler
         self.prediction_type = prediction_type
+        self.aux_token_loss_weight = aux_token_loss_weight
+        self.aux_token_loss_low_t_threshold = aux_token_loss_low_t_threshold
 
         # Ensure null answer token exists
         if null_ans_token not in tokenizer.get_vocab():
@@ -131,6 +135,13 @@ class LatentDiffusionQA(nn.Module):
             self.scheduler,
             num_inference_steps=num_inference_timesteps,
             prediction_type=prediction_type,
+        )
+
+        # ARCHITECTURAL FIX: Assert prediction_type consistency across components
+        # Mismatched prediction types cause silent failures in diffusion
+        assert self.diffusion.prediction_type == self.sampler.prediction_type, (
+            f"Prediction type mismatch: diffusion={self.diffusion.prediction_type}, "
+            f"sampler={self.sampler.prediction_type}"
         )
 
         # Cache null answer embedding for threshold comparison
@@ -282,20 +293,16 @@ class LatentDiffusionQA(nn.Module):
                     ret["latent_mask"] = vae_output["latent_mask"]
                 return ret
 
-        # FIX: Reuse mean from VAE loss computation instead of re-encoding
-        # This ensures consistency and avoids redundant computation
-        if self.use_vae and "mean" in vae_output:
-            # BUG #40 FIX: Add small noise to mean during training to match VAE distribution
-            # The VAE decoder was trained on z = mean + eps*std (sampled), not just mean.
-            # Training diffusion on pure mean creates a distribution mismatch.
-            # We add scaled noise to approximate the VAE posterior sampling.
-            z_0 = vae_output["mean"]
-            if self.training and "logvar" in vae_output:
-                # Add small noise proportional to VAE's learned variance
-                # Scale factor 0.1 keeps noise small but present
-                std = torch.exp(0.5 * vae_output["logvar"])
-                noise = torch.randn_like(z_0)
-                z_0 = z_0 + 0.1 * std * noise
+        # FIX (Option C): Use sampled z instead of mean for diffusion training
+        # This aligns with the VAE's training distribution where z = mean + eps*std
+        # Previously: Used mean + 0.1*std*noise which created distribution mismatch
+        # Now: Use the full sampled z to match what VAE decoder was trained on
+        if self.use_vae and "z" in vae_output:
+            # Use the reparameterized sample directly - this is what VAE decoder was trained on
+            z_0 = vae_output["z"]
+            # During eval, use mean for deterministic behavior
+            if not self.training:
+                z_0 = vae_output["mean"]
 
             # Recompute latent_mask from answer_mask (downsample to latent_seq_len)
             latent_mask = F.adaptive_max_pool1d(
@@ -479,6 +486,71 @@ class LatentDiffusionQA(nn.Module):
                 if torch.isnan(penalty_loss) or torch.isinf(penalty_loss):
                     penalty_loss = torch.tensor(0.0, device=diffusion_loss.device)
 
+        # Option A: Auxiliary Token Loss
+        # Provides direct token-level signal to diffusion by decoding predicted x_0
+        aux_token_loss = torch.tensor(0.0, device=diffusion_loss.device)
+
+        if self.aux_token_loss_weight > 0 and self.training and self.use_vae and not train_vae_only:
+            # Get timesteps and model outputs from diffusion training
+            t_all = diff_output["t"]
+            model_output_all = diff_output["model_output"]
+            noise_all = diff_output["noise"]
+
+            # Filter to low-t samples where pred_x0 is reliable
+            low_t_mask = t_all < self.aux_token_loss_low_t_threshold
+
+            if low_t_mask.sum() > 0:
+                # Get the subset of samples with low t
+                z_0_subset = z_0[low_t_mask]
+                t_subset = t_all[low_t_mask]
+                noise_subset = noise_all[low_t_mask]
+                model_output_subset = model_output_all[low_t_mask]
+                answer_ids_subset = answer_ids[low_t_mask]
+                answer_mask_subset = answer_mask[low_t_mask]
+
+                # Reconstruct z_t from the sampled noise and timesteps
+                z_t_subset, _ = self.diffusion.q_sample(z_0_subset, t_subset, noise_subset)
+
+                # Predict x_0 from z_t and model output
+                pred_x0_subset = self.diffusion.predict_x0(
+                    z_t_subset, t_subset, model_output_subset
+                )
+
+                # Clamp for stability
+                pred_x0_subset = torch.clamp(pred_x0_subset, -5.0, 5.0)
+
+                # Inverse transform if scaler was used
+                if self.scaler is not None:
+                    pred_x0_subset = self.scaler.inverse_transform(pred_x0_subset)
+
+                # Decode predicted latents to token logits (no return_tokens to get logits)
+                pred_logits = self.decode_latent(pred_x0_subset, return_tokens=False)
+
+                # Compute cross-entropy loss against target tokens
+                # pred_logits: [batch, seq_len, vocab_size]
+                # answer_ids_subset: [batch, seq_len]
+                vocab_size = pred_logits.shape[-1]
+
+                # Flatten for cross-entropy: [batch*seq_len, vocab_size] vs [batch*seq_len]
+                pred_logits_flat = pred_logits.view(-1, vocab_size)
+                target_flat = answer_ids_subset.view(-1)
+
+                # Compute masked cross-entropy (ignore padding tokens)
+                ce_loss = F.cross_entropy(pred_logits_flat, target_flat, reduction="none")
+                ce_loss = ce_loss.view(answer_ids_subset.shape)
+
+                # Apply mask (1 for valid, 0 for padding)
+                masked_ce = ce_loss * answer_mask_subset
+                num_valid = answer_mask_subset.sum().clamp(min=1.0)
+                aux_token_loss = masked_ce.sum() / num_valid
+
+                # Scale by weight
+                aux_token_loss = self.aux_token_loss_weight * aux_token_loss
+
+                # Safety check
+                if torch.isnan(aux_token_loss) or torch.isinf(aux_token_loss):
+                    aux_token_loss = torch.tensor(0.0, device=diffusion_loss.device)
+
         # Combine losses (penalty already scaled by false_negative_penalty_weight in config)
         # FIX: Only add VAE loss during VAE warmup phase (train_vae_only=True)
         # During diffusion training (train_vae_only=False), VAE is frozen and vae_loss
@@ -486,7 +558,7 @@ class LatentDiffusionQA(nn.Module):
         if self.use_vae and train_vae_only:
             total_loss = diffusion_loss + (vae_loss * 0.1) + penalty_loss
         else:
-            total_loss = diffusion_loss + penalty_loss
+            total_loss = diffusion_loss + penalty_loss + aux_token_loss
 
         ret = {
             "loss": total_loss,
@@ -495,6 +567,7 @@ class LatentDiffusionQA(nn.Module):
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
             "penalty": penalty_loss,
+            "aux_token_loss": aux_token_loss,  # Option A: Token-level reconstruction loss
         }
 
         if "z" in vae_output:

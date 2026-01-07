@@ -25,6 +25,64 @@ from models import LatentDiffusionQA
 from models.scaler import LatentScaler
 from metrics import compute_metrics
 from typing import Optional
+import copy
+
+
+class EMA:
+    """
+    Exponential Moving Average for model weights.
+    
+    ARCHITECTURAL FIX: Diffusion models benefit from using EMA weights during
+    inference, providing smoother and more stable outputs.
+    
+    Usage:
+        ema = EMA(model, decay=0.9999)
+        # During training:
+        ema.update()
+        # During validation:
+        ema.apply_shadow()  # Use EMA weights
+        validate(...)
+        ema.restore()  # Restore training weights
+    """
+    
+    def __init__(self, model: nn.Module, decay: float = 0.9999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        # Initialize shadow weights
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self):
+        """Update EMA weights after an optimizer step."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name] = (
+                    self.decay * self.shadow[name] + (1 - self.decay) * param.data
+                )
+    
+    def apply_shadow(self):
+        """Apply EMA weights to model (for validation/inference)."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        """Restore original weights after validation."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data = self.backup[name]
+        self.backup = {}
+    
+    def to(self, device):
+        """Move EMA shadow weights to device."""
+        for name in self.shadow:
+            self.shadow[name] = self.shadow[name].to(device)
+        return self
 
 
 def get_kl_weight(
@@ -577,6 +635,7 @@ def train_step(
         "diff_loss": outputs["diffusion_loss"].item(),
         "vae_loss": outputs["vae_loss"].item(),
         "penalty": outputs.get("penalty", torch.tensor(0.0)).item(),
+        "aux_token_loss": outputs.get("aux_token_loss", torch.tensor(0.0)).item(),  # Option A
         "mean_norm": mean_norm,
         "std_mean": std_mean,
         "grad_norm": current_grad_norm if current_grad_norm is not None else 0.0,
@@ -959,6 +1018,8 @@ def main():
         scaler=latent_scaler,
         prediction_type=config.diffusion.prediction_type,
         latent_seq_len=config.model.latent_seq_len,  # BUG #9 FIX: Use config value
+        aux_token_loss_weight=config.training.aux_token_loss_weight,  # Option A fix
+        aux_token_loss_low_t_threshold=config.training.aux_token_loss_low_t_threshold,
     )
     model = model.to(device)  # This now also moves scheduler efficiently
 
@@ -1236,6 +1297,11 @@ def main():
     # Reset best val loss for diffusion phase
     best_val_loss = float("inf")
 
+    # BUG #34 FIX: Initialize EMA for diffusion training
+    # EMA provides smoother weights for validation/inference
+    ema = EMA(model, decay=0.9999)
+    print("EMA initialized for diffusion training")
+
     # Training loop
     for epoch in range(start_epoch, args.epochs):
         # Debug dimensions at start of first diffusion epoch with random batch
@@ -1253,6 +1319,15 @@ def main():
         model.train()
         epoch_loss = 0.0
 
+        # Metric accumulator for gradient accumulation logging
+        metric_accumulator = {
+            "loss": 0.0,
+            "diff_loss": 0.0,
+            "penalty": 0.0,
+            "aux_token_loss": 0.0,  # Option A fix
+            "count": 0,
+        }
+
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for batch_idx, batch in enumerate(pbar):
             current_step = epoch * len(train_loader) + batch_idx
@@ -1269,33 +1344,60 @@ def main():
                 global_step=current_step,
                 epoch=epoch,
             )
-            # Only step scheduler after full accumulation
-            if (batch_idx + 1) % accumulation_steps == 0:
-                scheduler.step()
 
-            epoch_loss += metrics["loss"]
-            global_step += 1
+            # Accumulate metrics
+            metric_accumulator["loss"] += metrics["loss"]
+            metric_accumulator["diff_loss"] += metrics["diff_loss"]
+            metric_accumulator["penalty"] += metrics["penalty"]
+            metric_accumulator["aux_token_loss"] += metrics["aux_token_loss"]  # Option A fix
+            metric_accumulator["count"] += 1
 
+            # Update pbar with current (noisy) metrics for immediate feedback
             pbar.set_postfix(
                 {
                     "loss": f"{metrics['loss']:.4f}",
-                    "diff": f"{metrics['diff_loss']:.4f}",
-                    "pen": f"{metrics['penalty']:.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                     "gn": f"{metrics['grad_norm']:.2f}",
                 }
             )
-            wandb.log(
-                {
-                    "train/loss": metrics["loss"],
-                    "train/diffusion_loss": metrics["diff_loss"],
-                    "train/penalty": metrics["penalty"],
-                    "train/lr": scheduler.get_last_lr()[0],
-                    "train/grad_norm": metrics["grad_norm"],
-                    "train/epoch": epoch,
-                    "train/global_step": global_step,
-                }
-            )
+
+            # Only step scheduler and log after full accumulation
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scheduler.step()
+
+                # BUG #34 FIX: Update EMA after each optimizer step
+                ema.update()
+
+                # Compute averages for logging
+                avg_loss = metric_accumulator["loss"] / metric_accumulator["count"]
+                avg_diff = metric_accumulator["diff_loss"] / metric_accumulator["count"]
+                avg_pen = metric_accumulator["penalty"] / metric_accumulator["count"]
+                avg_aux = (
+                    metric_accumulator["aux_token_loss"] / metric_accumulator["count"]
+                )  # Option A fix
+
+                # Use grad_norm from this step (which is the optimizer step)
+                grad_norm = metrics["grad_norm"]
+
+                wandb.log(
+                    {
+                        "train/loss": avg_loss,
+                        "train/diffusion_loss": avg_diff,
+                        "train/penalty": avg_pen,
+                        "train/aux_token_loss": avg_aux,  # Option A fix
+                        "train/lr": scheduler.get_last_lr()[0],
+                        "train/grad_norm": grad_norm,
+                        "train/epoch": epoch,
+                        "train/global_step": global_step,
+                    }
+                )
+
+                # Reset accumulator
+                metric_accumulator = {k: 0.0 for k in metric_accumulator}
+                metric_accumulator["count"] = 0
+
+            epoch_loss += metrics["loss"]
+            global_step += 1
 
             if global_step % config.training.save_every == 0:
                 save_checkpoint(
@@ -1309,9 +1411,14 @@ def main():
                 )
 
         avg_train_loss = epoch_loss / len(train_loader)
+
+        # BUG #34 FIX: Use EMA weights for validation
+        ema.apply_shadow()
         val_metrics = validate(
             model, val_loader, device, max_metric_batches=20, global_step=global_step, epoch=epoch
         )
+        ema.restore()  # Restore training weights after validation
+
         val_loss = val_metrics["loss"]
         val_f1 = val_metrics["f1"]
         val_em = val_metrics["em"]

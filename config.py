@@ -97,6 +97,11 @@ class TrainingConfig:
     false_negative_penalty_weight: float = 0.1
     false_negative_penalty_margin: float = 0.3  # Margin for hinge loss
 
+    # Auxiliary token loss (Option A fix for VAE-Diffusion alignment)
+    # This provides direct token-level signal to the diffusion model
+    aux_token_loss_weight: float = 0.1  # Weight for auxiliary reconstruction loss
+    aux_token_loss_low_t_threshold: int = 500  # Only apply for t < threshold (reliable pred_x0)
+
     # Checkpointing
     output_dir: str = "./checkpoints"
     resume_from: Optional[str] = None

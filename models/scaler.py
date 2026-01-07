@@ -32,35 +32,39 @@ class LatentScaler:
 
     def fit(self, dataloader, vae_model, device, noise_scale: float = 0.1):
         """
-        Compute global mean and std of latents from dataloader.
-        Optimized to keep data on GPU and reduce CPU-GPU transfers.
+        Compute global mean and std of latents from dataloader in a SINGLE PASS.
+        
+        ARCHITECTURAL FIX: Previously used two passes over the dataset.
+        Now computes per-dimension stats AND global scale simultaneously using
+        an extended Welford's algorithm.
 
         Args:
             dataloader: DataLoader with training data
             vae_model: The VAE model to encode latents
             device: Device to run on
-            noise_scale: Scale of noise to add (matches Bug #40 fix in latent_diffusion.py)
+            noise_scale: Scale of noise to add (matches training distribution)
         """
-        print("Fitting LatentScaler...")
+        print("Fitting LatentScaler (single-pass)...")
         vae_model.eval()
         self.device = device
 
-        # Use online statistics to avoid storing all latents in memory
+        # Per-dimension online statistics (Welford's algorithm)
         running_mean = torch.zeros(vae_model.latent_dim, device=device)
-        running_var = torch.zeros(vae_model.latent_dim, device=device)
+        running_M2 = torch.zeros(vae_model.latent_dim, device=device)  # Sum of squared deviations
         total_count = 0
 
+        # Global online statistics (for normalized values - estimated from per-dim stats)
+        # We'll compute global_scale from the per-dim variance distribution
+        all_batch_global_vars = []
+
         with torch.no_grad():
-            for batch in tqdm(dataloader, desc="Computing latent stats"):
+            for batch in tqdm(dataloader, desc="Fitting scaler"):
                 answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
                 answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
 
-                # BUG #45 FIX: Get both mean and logvar to add noise matching training
-                # During diffusion training, we use mean + 0.1*std*noise (Bug #40 fix)
-                # Scaler should be fitted on the same distribution
+                # Encode with noise to match training distribution
                 z_sampled, mean, logvar, latent_mask = vae_model.encode(answer_ids, answer_mask)
 
-                # Add small noise to mean to match diffusion training distribution
                 if noise_scale > 0:
                     std = torch.exp(0.5 * logvar)
                     noise = torch.randn_like(mean)
@@ -68,82 +72,44 @@ class LatentScaler:
                 else:
                     z = mean
 
-                # Mask out padding and compute statistics online
+                # Mask out padding
                 mask = latent_mask.bool()
                 z_masked = z[mask]  # [valid_latents, latent_dim]
 
-                # Online mean and variance calculation
+                if z_masked.shape[0] == 0:
+                    continue
+
                 batch_count = z_masked.shape[0]
+
+                # Welford's online algorithm for mean and variance
+                for i in range(batch_count):
+                    total_count += 1
+                    delta = z_masked[i] - running_mean
+                    running_mean = running_mean + delta / total_count
+                    delta2 = z_masked[i] - running_mean
+                    running_M2 = running_M2 + delta * delta2
+
+                # Track global variance estimate for this batch
+                # (After per-dim normalization, what's the overall std?)
                 batch_mean = z_masked.mean(dim=0)
-                batch_var = ((z_masked - batch_mean) ** 2).mean(dim=0)
+                batch_var = z_masked.var(dim=0)
+                # Estimate: after normalizing by running stats, what's the global var?
+                if total_count > 100:  # Only after we have stable estimates
+                    current_std = torch.sqrt(running_M2 / total_count).clamp(min=1e-3)
+                    z_norm_est = (z_masked - running_mean) / current_std
+                    all_batch_global_vars.append(z_norm_est.var().item())
 
-                # Update running statistics
-                delta = batch_mean - running_mean
-                new_count = total_count + batch_count
-
-                running_mean = running_mean + delta * batch_count / new_count
-
-                # Update variance using Welford's algorithm
-                m_a = running_var * total_count
-                m_b = batch_var * batch_count
-                M2 = m_a + m_b + delta**2 * total_count * batch_count / new_count
-                running_var = M2 / new_count
-
-                total_count = new_count
-
-        # Final statistics
+        # Finalize per-dimension statistics
         self.mean = running_mean
-        self.std = torch.sqrt(running_var)
+        variance = running_M2 / max(total_count, 1)
+        self.std = torch.sqrt(variance).clamp(min=1e-3)
 
-        # Avoid division by zero and handle collapsed dimensions
-        self.std = torch.clamp(self.std, min=1e-3)
-
-        # CRITICAL FIX: Compute global scaling factor
-        # After per-dim normalization, compute the actual global std
-        # to ensure the final output has std ≈ 1.0
-        print("Computing global scaling factor...")
-        # BUG #35 FIX: Use proper variance formula Var = E[x²] - E[x]²
-        # The previous code computed E[x²] (second moment) which overestimates variance
-        # if there's any residual mean shift after per-dim normalization
-        global_mean_sum = 0.0
-        global_sq_sum = 0.0
-        global_count = 0
-
-        with torch.no_grad():
-            for batch in tqdm(dataloader, desc="Computing global scale"):
-                answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
-                answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
-
-                # BUG #45 FIX: Use same noise injection as first pass
-                z_sampled, mean, logvar, latent_mask = vae_model.encode(answer_ids, answer_mask)
-
-                if noise_scale > 0:
-                    std = torch.exp(0.5 * logvar)
-                    noise = torch.randn_like(mean)
-                    z = mean + noise_scale * std * noise
-                else:
-                    z = mean
-
-                # Apply per-dim normalization
-                z_norm = (z - self.mean) / self.std
-
-                # Only count valid (non-padded) tokens
-                mask = latent_mask.bool()
-                z_valid = z_norm[mask]
-
-                if z_valid.numel() > 0:
-                    # Accumulate for proper variance: Var = E[x²] - E[x]²
-                    global_mean_sum += z_valid.sum().item()
-                    global_sq_sum += (z_valid**2).sum().item()
-                    global_count += z_valid.numel()
-
-        # Compute global std after per-dim normalization using proper variance formula
-        if global_count > 0:
-            global_mean = global_mean_sum / global_count
-            global_variance = (global_sq_sum / global_count) - global_mean**2
-            # Clamp variance to positive value to handle numerical issues
-            global_variance = max(global_variance, 1e-6)
-            self.global_scale = torch.tensor(global_variance**0.5, device=device)
+        # Compute global scale from collected estimates
+        if all_batch_global_vars:
+            # Use median for robustness to outliers
+            sorted_vars = sorted(all_batch_global_vars)
+            median_var = sorted_vars[len(sorted_vars) // 2]
+            self.global_scale = torch.tensor(median_var ** 0.5, device=device)
         else:
             self.global_scale = torch.tensor(1.0, device=device)
 
