@@ -1185,11 +1185,15 @@ def main():
         # Re-initialize optimizer for diffusion only
         # We need to filter out frozen parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
+        # BUG #50 FIX: Use higher LR for diffusion phase (3x base LR)
+        # With frozen VAE and encoder, only denoiser trains - needs higher LR
+        diffusion_lr = config.training.learning_rate * 3  # 3e-5 instead of 1e-5
         optimizer = AdamW(
             trainable_params,
-            lr=config.training.learning_rate,
+            lr=diffusion_lr,
             weight_decay=config.training.weight_decay,
         )
+        print(f"Diffusion phase LR: {diffusion_lr} (3x base)")
 
         # Re-init scheduler for diffusion phase with its own T_max
         diffusion_steps = steps_per_epoch * args.epochs

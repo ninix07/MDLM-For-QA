@@ -236,7 +236,7 @@ class LatentDiffusionQA(nn.Module):
         answer_mask: torch.Tensor,
         train_vae_only: bool = False,
         kl_weight: float = 0.1,
-        cond_dropout_prob: float = 0.1,
+        cond_dropout_prob: float = 0.15,  # BUG #49 FIX: Increased from 0.1 for better CFG
     ) -> Dict[str, torch.Tensor]:
         """
         Training forward pass.
@@ -410,9 +410,10 @@ class LatentDiffusionQA(nn.Module):
             # Apply penalty to ALL answerable examples, not just a subset
             subset_indices = torch.where(is_answerable)[0]
 
-            # Sample randomly if too many (for memory efficiency)
-            if len(subset_indices) > 8:
-                perm = torch.randperm(len(subset_indices))[:8]
+            # BUG #48 FIX: Increased from 8 to 32 samples to reduce variance
+            # With only 8 samples, penalty had high variance causing unstable gradients
+            if len(subset_indices) > 32:
+                perm = torch.randperm(len(subset_indices))[:32]
                 subset_indices = subset_indices[perm]
 
             # Retrieve necessary tensors for the subset from diff_output
@@ -515,10 +516,10 @@ class LatentDiffusionQA(nn.Module):
         context_mask: torch.Tensor,
         question_ids: torch.Tensor,
         question_mask: torch.Tensor,
-        null_threshold: float = 0.3,
+        null_threshold: float = 0.5,  # BUG #51 FIX: Match config default
         show_progress: bool = False,
         num_inference_steps: Optional[int] = None,
-        guidance_scale: float = 5.0,
+        guidance_scale: float = 1.5,  # BUG #51 FIX: Match config default
     ) -> Dict[str, torch.Tensor]:
         """
         Generate answer for given context and question.
