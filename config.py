@@ -66,15 +66,15 @@ class DiffusionConfig:
 class TrainingConfig:
     """Training configuration."""
 
-    # Batch size (reduced for memory - use gradient accumulation for effective larger batch)
-    batch_size: int = 8
-    gradient_accumulation_steps: int = 8  # Effective batch size = 32
+    # Batch size (increased for stability)
+    batch_size: int = 16
+    gradient_accumulation_steps: int = 4  # Effective batch size = 16 * 4 = 64
 
     # Learning rate
     learning_rate: float = 1e-5  # Smaller LR for large model convergence
     weight_decay: float = 0.1
     warmup_steps: int = 2000
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5  # Reduced from 1.0 to clip spikes aggressively
 
     # Training duration
     num_epochs: int = 10
@@ -88,8 +88,6 @@ class TrainingConfig:
     # Mixed precision
     use_amp: bool = True
 
-    # Balanced batching for SQuAD 2.0
-    answerable_ratio: float = 0.75  # 75% answerable - bias heavily toward finding answers
 
     # False negative penalty (penalize predicting no answer when answerable)
     # BUG #34 FIX: Reduced from 0.5 to 0.1 - penalty was still dominating diffusion loss

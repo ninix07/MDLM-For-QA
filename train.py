@@ -86,7 +86,7 @@ class EMA:
 
 
 def get_kl_weight(
-    current_step: int, total_steps: int, target_kl: float = 0.01, cycles: int = 4
+    current_step: int, total_steps: int, target_kl: float = 0.01, cycles: int = 1
 ) -> float:
     """
     Calculate KL weight using cyclic linear annealing.
@@ -559,7 +559,7 @@ def train_step(
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
             grad_scaler.unscale_(optimizer)
-            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm).item()
             grad_scaler.step(optimizer)
             grad_scaler.update()
         else:
@@ -582,7 +582,7 @@ def train_step(
 
         # Only step optimizer after accumulation
         if (step_idx + 1) % accumulation_steps == 0:
-            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+            current_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm).item()
             optimizer.step()
         else:
             current_grad_norm = get_grad_norm(model)
@@ -983,7 +983,6 @@ def main():
         max_context_length=config.model.max_context_length,
         max_question_length=config.model.max_question_length,
         max_answer_length=config.model.max_answer_length,
-        use_balanced_sampler=False,  # Use natural dataset distribution
         shuffle=True,
     )
 
@@ -995,7 +994,6 @@ def main():
         max_context_length=config.model.max_context_length,
         max_question_length=config.model.max_question_length,
         max_answer_length=config.model.max_answer_length,
-        use_balanced_sampler=False,
         shuffle=False,
     )
 
@@ -1109,12 +1107,14 @@ def main():
 
             for batch_idx, batch in enumerate(pbar):
                 current_step = global_step
-                # Cyclical KL annealing to prevent posterior collapse
+                # BUG #40 FIX: Switch to Monotonic Annealing (cycles=1)
+                # Cyclical annealing (cycles=4) caused sudden spikes/drops in loss that confused the user.
+                # Monotonic is more stable: start low, ramp up, stay high.
                 current_kl = get_kl_weight(
                     current_step,
                     total_steps=total_warmup_steps,
                     target_kl=config.training.target_kl,
-                    cycles=4,
+                    cycles=1,
                 )
 
                 metrics = train_step(
@@ -1254,9 +1254,9 @@ def main():
         # Re-initialize optimizer for diffusion only
         # We need to filter out frozen parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
-        # BUG #50 FIX: Use higher LR for diffusion phase (3x base LR)
-        # With frozen VAE and encoder, only denoiser trains - needs higher LR
-        diffusion_lr = config.training.learning_rate * 3  # 3e-5 instead of 1e-5
+        # BUG #50 FIX: Use higher LR for diffusion phase (2x base LR)
+        # With frozen VAE and encoder, only denoiser trains - needs higher LR but 3x was too unstable
+        diffusion_lr = config.training.learning_rate * 2  # 2e-5 instead of 3e-5
         optimizer = AdamW(
             trainable_params,
             lr=diffusion_lr,

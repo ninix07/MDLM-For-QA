@@ -174,73 +174,9 @@ class SQuAD2Dataset(Dataset):
         return self.tokenized_data[idx]
 
 
-class BalancedSQuADSampler(Sampler):
-    """
-    Sampler that ensures balanced batches with 50% answerable and 50% unanswerable.
 
-    This is crucial for SQuAD 2.0 to prevent the model from biasing towards
-    one type of answer.
-    """
 
-    def __init__(
-        self,
-        dataset: SQuAD2Dataset,
-        batch_size: int,
-        answerable_ratio: float = 0.5,
-        shuffle: bool = True,
-        drop_last: bool = True,
-    ):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.answerable_ratio = answerable_ratio
-        self.shuffle = shuffle
-        self.drop_last = drop_last
 
-        self.answerable_indices = dataset.answerable_indices.copy()
-        self.unanswerable_indices = dataset.unanswerable_indices.copy()
-
-        # Calculate samples per batch
-        self.answerable_per_batch = int(batch_size * answerable_ratio)
-        self.unanswerable_per_batch = batch_size - self.answerable_per_batch
-
-        # Calculate total batches
-        max_answerable_batches = len(self.answerable_indices) // self.answerable_per_batch
-        max_unanswerable_batches = len(self.unanswerable_indices) // self.unanswerable_per_batch
-        self.num_batches = min(max_answerable_batches, max_unanswerable_batches)
-
-    def __iter__(self):
-        if self.shuffle:
-            random.shuffle(self.answerable_indices)
-            random.shuffle(self.unanswerable_indices)
-
-        answerable_idx = 0
-        unanswerable_idx = 0
-
-        for _ in range(self.num_batches):
-            batch_indices = []
-
-            # Add answerable samples
-            batch_indices.extend(
-                self.answerable_indices[answerable_idx : answerable_idx + self.answerable_per_batch]
-            )
-            answerable_idx += self.answerable_per_batch
-
-            # Add unanswerable samples
-            batch_indices.extend(
-                self.unanswerable_indices[
-                    unanswerable_idx : unanswerable_idx + self.unanswerable_per_batch
-                ]
-            )
-            unanswerable_idx += self.unanswerable_per_batch
-
-            # Shuffle within batch
-            if self.shuffle:
-                random.shuffle(batch_indices)
-
-            yield from batch_indices
-
-    def __len__(self) -> int:
-        return self.num_batches * self.batch_size
 
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
@@ -266,10 +202,8 @@ def create_dataloader(
     max_context_length: int = 384,
     max_question_length: int = 64,
     max_answer_length: int = 64,
-    answerable_ratio: float = 0.5,
     shuffle: bool = True,
     num_workers: int = 4,
-    use_balanced_sampler: bool = True,
     pin_memory: bool = None,
 ) -> Tuple[DataLoader, SQuAD2Dataset]:
     """Create DataLoader with balanced sampling."""
@@ -286,24 +220,7 @@ def create_dataloader(
     if pin_memory is None:
         pin_memory = torch.cuda.is_available()
 
-    if use_balanced_sampler:
-        sampler = BalancedSQuADSampler(
-            dataset=dataset,
-            batch_size=batch_size,
-            answerable_ratio=answerable_ratio,
-            shuffle=shuffle,
-        )
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            sampler=sampler,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            drop_last=True,
-            collate_fn=collate_fn,  # Use custom collate to handle string IDs
-        )
-    else:
-        dataloader = DataLoader(
+    dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
