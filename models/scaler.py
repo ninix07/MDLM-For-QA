@@ -30,7 +30,7 @@ class LatentScaler:
         """Check if scaler has been fitted."""
         return self.mean is not None and self.std is not None and self.global_scale is not None
 
-    def fit(self, dataloader, vae_model, device, noise_scale: float = 0.1):
+    def fit(self, dataloader, vae_model, device):
         """
         Compute global mean and std of latents from dataloader in a SINGLE PASS.
         
@@ -42,7 +42,6 @@ class LatentScaler:
             dataloader: DataLoader with training data
             vae_model: The VAE model to encode latents
             device: Device to run on
-            noise_scale: Scale of noise to add (matches training distribution)
         """
         print("Fitting LatentScaler (single-pass)...")
         vae_model.eval()
@@ -62,17 +61,11 @@ class LatentScaler:
                 answer_ids = batch["answer_input_ids"].to(device, non_blocking=True)
                 answer_mask = batch["answer_attention_mask"].to(device, non_blocking=True)
 
-                # Encode with noise to match training distribution
+                # BUG #33 FIX: Use z_sampled directly from VAE
+                # This ensures the scaler is fitted on the EXACT distribution seen during training
+                # BUG #33 FIX: Use z_sampled directly
                 z_sampled, mean, logvar, latent_mask = vae_model.encode(answer_ids, answer_mask)
-
-                if noise_scale > 0:
-                    std = torch.exp(0.5 * logvar)
-                    noise = torch.randn_like(mean)
-                    z = mean + noise_scale * std * noise
-                else:
-                    z = mean
-
-                # Mask out padding
+                z = z_sampled
                 mask = latent_mask.bool()
                 z_masked = z[mask]  # [valid_latents, latent_dim]
 
