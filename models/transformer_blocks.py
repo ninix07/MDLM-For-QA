@@ -47,9 +47,9 @@ class ConditionalTransformerBlock(nn.Module):
         # Set gate biases to small positive value to allow gradient flow
         with torch.no_grad():
             # Gate indices: gt1 at [2*d:3*d], gt2 at [5*d:6*d], gt3 at [8*d:9*d]
-            self.time_mlp[1].bias[2 * d_model : 3 * d_model] = 0.1  # gt1 (self-attn gate)
-            self.time_mlp[1].bias[5 * d_model : 6 * d_model] = 0.1  # gt2 (cross-attn gate)
-            self.time_mlp[1].bias[8 * d_model : 9 * d_model] = 0.1  # gt3 (FF gate)
+            self.time_mlp[1].bias[2 * d_model : 3 * d_model] = 1.0  # gt1 (self-attn gate)
+            self.time_mlp[1].bias[5 * d_model : 6 * d_model] = 2.0  # gt2 (cross-attn gate) - Force stronger attention
+            self.time_mlp[1].bias[8 * d_model : 9 * d_model] = 1.0  # gt3 (FF gate)
 
     def modulate(self, x, shift, scale):
         # Apply shift and scale to normalized input

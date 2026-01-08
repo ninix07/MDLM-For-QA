@@ -98,11 +98,11 @@ def test_vae_reconstruction():
     # Load dataset
     print("Loading dataset...")
     dataset = SQuAD2Dataset(
-        data_path=config.dev_file,
+        data_path=cfg.dev_file,
         tokenizer=tokenizer,
-        max_context_length=config.model.max_context_length,
-        max_question_length=config.model.max_question_length,
-        max_answer_length=config.model.max_answer_length,
+        max_context_length=cfg.model.max_context_length,
+        max_question_length=cfg.model.max_question_length,
+        max_answer_length=cfg.model.max_answer_length,
         null_ans_token=null_token,
     )
 
@@ -184,6 +184,7 @@ def test_vae_reconstruction():
         "char_overlap",
         "f1_score",
         "exact_match",
+        "z_norm",
     ]
 
     # Storage for results
@@ -285,11 +286,32 @@ def test_vae_reconstruction():
                 # Track for overall metrics
                 all_predictions.append(pred_text)
                 all_references.append(ref_text)
+                
+                # Check VAE bias: Latent Norms
+                z_sample = outputs["z"][i] # [seq, dim]
+                z_norm = z_sample.norm().item()
+                result["z_norm"] = z_norm
 
                 if ref_text.strip():  # Answerable
                     answerable_f1s.append(f1_score)
                 else:  # Unanswerable
                     unanswerable_f1s.append(f1_score)
+
+    # Compare Answerable vs Unanswerable Latents
+    ans_norms = [r["z_norm"] for r in results if r["type"] == "ANSWERABLE"]
+    unans_norms = [r["z_norm"] for r in results if r["type"] == "UNANSWERABLE"]
+    
+    print("\n=== VAE Latent Bias Analysis ===")
+    if ans_norms:
+        print(f"Answerable Latent Norm: {sum(ans_norms)/len(ans_norms):.4f}")
+    if unans_norms:
+        print(f"Unanswerable Latent Norm: {sum(unans_norms)/len(unans_norms):.4f}")
+        
+    # Check if NULL latent is effectively zero (Collapse to Mean)
+    # The VAE Prior is N(0,1). If NULL maps to 0, it's the mode.
+    # Note: Dimension is roughly 16*256 = 4096 elements.
+    # Expected norm if N(0,1): sqrt(4096) = 64.
+    # If Norm is significantly lower, it's collapsing.
 
     # Write results to CSV
     print(f"\nWriting detailed results to {csv_filename}...")
