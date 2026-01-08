@@ -90,15 +90,15 @@ class TrainingConfig:
 
 
     # False negative penalty (penalize predicting no answer when answerable)
-    # BUG #34 FIX: Reduced from 0.5 to 0.1 - penalty was still dominating diffusion loss
-    # At 0.5, penalty (0.05-0.25) could equal or exceed diffusion loss (0.05-0.2)
-    false_negative_penalty_weight: float = 0.1
-    false_negative_penalty_margin: float = 0.3  # Margin for hinge loss
+    # False negative penalty (penalize predicting no answer when answerable)
+    # BUG #34 FIX: Increased to 1.0 to combat modal collapse (predicting NULL for everything)
+    false_negative_penalty_weight: float = 1.0
+    false_negative_penalty_margin: float = 0.4  # Increased margin to push away from null
 
     # Auxiliary token loss (Option A fix for VAE-Diffusion alignment)
     # This provides direct token-level signal to the diffusion model
-    aux_token_loss_weight: float = 0.1  # Weight for auxiliary reconstruction loss
-    aux_token_loss_low_t_threshold: int = 500  # Only apply for t < threshold (reliable pred_x0)
+    aux_token_loss_weight: float = 1.0  # Increased to 1.0 to force learning
+    aux_token_loss_low_t_threshold: int = 1000  # Apply to first 50% of steps
 
     # Checkpointing
     output_dir: str = "./checkpoints"

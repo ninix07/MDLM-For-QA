@@ -433,9 +433,9 @@ class LatentDiffusionQA(nn.Module):
             # BUG #33 FIX: Only compute penalty for low-t samples where pred_x0 is reliable
             # At high t (e.g., t=900), z_t is almost pure noise and pred_x0 is garbage
             # This adds noise to the gradient and prevents effective learning
-            # BUG #39 FIX: Increased from 200 to 500 (25% of 2000 timesteps)
-            # With 200, only 10% of samples qualified, often resulting in zero penalty samples
-            low_t_threshold = 500  # Use samples with t < 500 (25% of timesteps)
+            # BUG #39 FIX: Increased from 500 to 1000 (50% of 2000 timesteps)
+            # Increased coverage for penalty calculation
+            low_t_threshold = 1000  # Use samples with t < 1000
             low_t_mask = t_ans < low_t_threshold
 
             if low_t_mask.sum() > 0:
