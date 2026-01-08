@@ -59,7 +59,8 @@ class DiffusionConfig:
     cosine_s: float = 0.008  # Small offset to prevent singularity
 
     # Prediction type: 'epsilon' (noise) or 'v' (velocity)
-    prediction_type: str = "v"
+    # BUG #53 FIX: Switched to 'epsilon' for stability (v-pred was unstable)
+    prediction_type: str = "epsilon"
 
 
 @dataclass
@@ -88,16 +89,14 @@ class TrainingConfig:
     # Mixed precision
     use_amp: bool = True
 
-
     # False negative penalty (penalize predicting no answer when answerable)
-    # False negative penalty (penalize predicting no answer when answerable)
-    # BUG #34 FIX: Increased to 1.0 to combat modal collapse (predicting NULL for everything)
-    false_negative_penalty_weight: float = 1.0
-    false_negative_penalty_margin: float = 0.4  # Increased margin to push away from null
+    # BUG #54 FIX: Disabled (0.0) - penalty calculation was flawed/ineffective
+    false_negative_penalty_weight: float = 0.0
+    false_negative_penalty_margin: float = 0.4
 
     # Auxiliary token loss (Option A fix for VAE-Diffusion alignment)
     # This provides direct token-level signal to the diffusion model
-    aux_token_loss_weight: float = 1.0  # Increased to 1.0 to force learning
+    aux_token_loss_weight: float = 1.0  # Keep high to force semantic learning
     aux_token_loss_low_t_threshold: int = 1000  # Apply to first 50% of steps
 
     # Checkpointing
@@ -120,8 +119,8 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    # BUG #36 FIX: Reduced from 3.0 to 1.5 - high guidance pushes latents out of VAE distribution
-    guidance_scale: float = 1.5
+    # BUG #55 FIX: Increased to 5.0 to force model to respect Context/Question
+    guidance_scale: float = 5.0
 
     # Null answer threshold
     null_ans_threshold: float = 0.5  # Require higher certainty before abstaining

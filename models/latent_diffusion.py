@@ -568,6 +568,7 @@ class LatentDiffusionQA(nn.Module):
             "kl_loss": kl_loss,
             "penalty": penalty_loss,
             "aux_token_loss": aux_token_loss,  # Option A: Token-level reconstruction loss
+            "pred_noise": diff_output["model_output"],  # FIX: Return for logging
         }
 
         if "z" in vae_output:
@@ -681,7 +682,11 @@ class LatentDiffusionQA(nn.Module):
 
         return {
             "tokens": tokens,
-            "is_null": is_null,
+            # BUG FIX: Force is_null to False temporarily to see what the model is predicting
+            # This allows us to debug if the output is garbage or valid-but-null-biased
+            # "is_null": is_null,
+            "is_null": torch.zeros_like(is_null, dtype=torch.bool), # DEBUG: Always return answers
+            "real_is_null": is_null, # Keep real value for logging
             "null_similarity": null_similarity,
             "latent": z_0,
         }
