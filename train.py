@@ -1029,6 +1029,7 @@ def main():
         latent_seq_len=config.model.latent_seq_len,  # BUG #9 FIX: Use config value
         aux_token_loss_weight=config.training.aux_token_loss_weight,  # Option A fix
         aux_token_loss_low_t_threshold=config.training.aux_token_loss_low_t_threshold,
+        latent_norm_scale=32.0,  # FIX: L2 Norm Radius to fix VAE Bias
     )
     model = model.to(device)  # This now also moves scheduler efficiently
 
