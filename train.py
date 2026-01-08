@@ -936,6 +936,10 @@ def main():
     parser.add_argument(
         "--force_vae_warmup", action="store_true", help="Force VAE warmup even if checkpoint exists"
     )
+    # BUG FIX Strategy: Filter dataset to force learning of answerable questions first
+    parser.add_argument(
+        "--only_answerable", action="store_true", default=False, help="Train only on answerable questions"
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -984,6 +988,7 @@ def main():
         max_question_length=config.model.max_question_length,
         max_answer_length=config.model.max_answer_length,
         shuffle=True,
+        only_answerable=args.only_answerable,
     )
 
     print("Loading validation data...")
@@ -995,6 +1000,7 @@ def main():
         max_question_length=config.model.max_question_length,
         max_answer_length=config.model.max_answer_length,
         shuffle=False,
+        only_answerable=args.only_answerable,  # Consistent validation
     )
 
     # Model

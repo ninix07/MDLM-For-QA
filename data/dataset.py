@@ -42,6 +42,7 @@ class SQuAD2Dataset(Dataset):
         max_question_length: int = 64,
         max_answer_length: int = 64,
         null_ans_token: str = "<NULL_ANS>",
+        only_answerable: bool = False,
     ):
         self.tokenizer = tokenizer
         self.max_context_length = max_context_length
@@ -57,6 +58,11 @@ class SQuAD2Dataset(Dataset):
 
         # Load data
         self.examples = self._load_squad(data_path)
+
+        # Filter for answerable only if requested (Debug strategy)
+        if only_answerable:
+            print("🚨 FILTERING DATASET: Keeping ONLY answerable questions!")
+            self.examples = [ex for ex in self.examples if not ex.is_impossible]
 
         # Separate answerable and unanswerable for balanced sampling
         self.answerable_indices = [i for i, ex in enumerate(self.examples) if not ex.is_impossible]
@@ -205,6 +211,7 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     pin_memory: bool = None,
+    only_answerable: bool = False,  # Arg to filter unanswerables
 ) -> Tuple[DataLoader, SQuAD2Dataset]:
     """Create DataLoader with balanced sampling."""
 
@@ -214,6 +221,7 @@ def create_dataloader(
         max_context_length=max_context_length,
         max_question_length=max_question_length,
         max_answer_length=max_answer_length,
+        only_answerable=only_answerable,
     )
 
     # Only use pin_memory on CUDA (not supported on MPS)
