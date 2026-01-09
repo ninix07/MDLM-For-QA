@@ -49,12 +49,10 @@ class LatentDiffusionQA(nn.Module):
         latent_seq_len: int = 16,  # BUG #9 FIX: Configurable, default 16 (was hardcoded 8)
         aux_token_loss_weight: float = 0.1,  # Option A: Auxiliary token loss weight
         aux_token_loss_low_t_threshold: int = 500,  # Only apply for t < threshold
-        latent_norm_scale: Optional[float] = 32.0,  # FIX: L2 Norm Radius
     ):
         super().__init__()
 
         self.tokenizer = tokenizer
-        self.latent_norm_scale = latent_norm_scale
         self.pad_token_id = tokenizer.pad_token_id
         self.latent_dim = latent_dim
         self.max_answer_len = max_answer_len
@@ -317,15 +315,8 @@ class LatentDiffusionQA(nn.Module):
 
         # Requirement 2: Latent Calibration
         # Normalize latent if scaler is provided
-        # NOTE: For "Normalization Fix", we apply scaler first (centering), then L2 Project.
         if self.scaler is not None:
             z_0 = self.scaler.transform(z_0, mask=latent_mask)
-
-        # FIX: L2 Projected Latent Space
-        # Force all latents to lie on a sphere of radius `latent_norm_scale` (default 32.0)
-        # This removes the magnitude advantage of the NULL vector (Norm ~90).
-        if getattr(self, "latent_norm_scale", None) is not None:
-             z_0 = F.normalize(z_0, p=2, dim=-1) * self.latent_norm_scale
 
         # IMPLEMENT CONDITIONING DROPOUT
         # This is required for CFG to work at inference

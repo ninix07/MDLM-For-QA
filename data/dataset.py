@@ -43,6 +43,7 @@ class SQuAD2Dataset(Dataset):
         max_answer_length: int = 64,
         null_ans_token: str = "<NULL_ANS>",
         only_answerable: bool = False,
+        unanswerable_sample_ratio: float = 1.0,  # Strategy 1: Balanced Sampling
     ):
         self.tokenizer = tokenizer
         self.max_context_length = max_context_length
@@ -63,6 +64,23 @@ class SQuAD2Dataset(Dataset):
         if only_answerable:
             print("🚨 FILTERING DATASET: Keeping ONLY answerable questions!")
             self.examples = [ex for ex in self.examples if not ex.is_impossible]
+        
+        # Strategy 1: Balanced Sampling (Prune Unanswerables)
+        # Randomly downsample unanswerable questions to fix class imbalance
+        elif unanswerable_sample_ratio < 1.0:
+            print(f"⚖️ BALANCED SAMPLING: Keeping {unanswerable_sample_ratio*100}% of unanswerable questions")
+            answerable_ex = [ex for ex in self.examples if not ex.is_impossible]
+            unanswerable_ex = [ex for ex in self.examples if ex.is_impossible]
+            
+            num_keep = int(len(unanswerable_ex) * unanswerable_sample_ratio)
+            # Use fixed seed for reproducibility of the subset selection
+            random.seed(42)  
+            unanswerable_ex_subset = random.sample(unanswerable_ex, num_keep)
+            
+            # Recombine
+            self.examples = answerable_ex + unanswerable_ex_subset
+            # Shuffle to mix them up
+            random.shuffle(self.examples)
 
         # Separate answerable and unanswerable for balanced sampling
         self.answerable_indices = [i for i, ex in enumerate(self.examples) if not ex.is_impossible]
@@ -212,6 +230,7 @@ def create_dataloader(
     num_workers: int = 4,
     pin_memory: bool = None,
     only_answerable: bool = False,  # Arg to filter unanswerables
+    unanswerable_sample_ratio: float = 1.0,  # Strategy 1: Balanced Sampling
 ) -> Tuple[DataLoader, SQuAD2Dataset]:
     """Create DataLoader with balanced sampling."""
 
@@ -222,6 +241,7 @@ def create_dataloader(
         max_question_length=max_question_length,
         max_answer_length=max_answer_length,
         only_answerable=only_answerable,
+        unanswerable_sample_ratio=unanswerable_sample_ratio,
     )
 
     # Only use pin_memory on CUDA (not supported on MPS)

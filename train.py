@@ -938,7 +938,15 @@ def main():
     )
     # BUG FIX Strategy: Filter dataset to force learning of answerable questions first
     parser.add_argument(
-        "--only_answerable", action="store_true", default=False, help="Train only on answerable questions"
+        "--only_answerable",
+        action="store_true",
+        help="Filter dataset to keep ONLY answerable questions (for debugging)",
+    )
+    parser.add_argument(
+        "--unanswerable_sample_ratio",
+        type=float,
+        default=1.0,
+        help="Ratio of unanswerable questions to keep (e.g., 0.1 for 10%)",
     )
     args = parser.parse_args()
 
@@ -1029,7 +1037,6 @@ def main():
         latent_seq_len=config.model.latent_seq_len,  # BUG #9 FIX: Use config value
         aux_token_loss_weight=config.training.aux_token_loss_weight,  # Option A fix
         aux_token_loss_low_t_threshold=config.training.aux_token_loss_low_t_threshold,
-        latent_norm_scale=32.0,  # FIX: L2 Norm Radius to fix VAE Bias
     )
     model = model.to(device)  # This now also moves scheduler efficiently
 
