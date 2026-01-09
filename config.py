@@ -119,8 +119,8 @@ class InferenceConfig:
     num_inference_steps: int = 50
 
     # Guidance scale for classifier-free guidance (if implemented)
-    # BUG #55 FIX: Increased to 5.0 to force model to respect Context/Question
-    guidance_scale: float = 5.0
+    # BUG #55 FIX: Reduced to 1.5 for stability (5.0 amplifies noise in early training)
+    guidance_scale: float = 1.5
 
     # Null answer threshold
     null_ans_threshold: float = 0.5  # Require higher certainty before abstaining
