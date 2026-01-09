@@ -1282,9 +1282,8 @@ def main():
         # Re-init scheduler for diffusion phase with its own T_max
         diffusion_steps = steps_per_epoch * args.epochs
         # BUG #41 FIX: Use appropriate warmup for diffusion phase
-        # The VAE warmup steps may not be optimal for diffusion training
-        # Use 10% of total steps or 1000, whichever is smaller
-        diffusion_warmup_steps = min(1000, diffusion_steps // 10)
+        # Use 5% of total steps for warmup (removing 1000 step cap which was too short)
+        diffusion_warmup_steps = int(diffusion_steps * 0.05)
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=diffusion_warmup_steps,
