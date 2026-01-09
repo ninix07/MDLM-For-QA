@@ -84,8 +84,16 @@ class ConditionalTransformerBlock(nn.Module):
                 condition_mask = condition_mask.clone()
                 condition_mask[all_masked, 0] = False  # Unmask first token
 
-        h, _ = self.cross_attn(h, condition, condition, key_padding_mask=condition_mask)
-        x = x + gt2.unsqueeze(1) * h
+        h_attn, _ = self.cross_attn(h, condition, condition, key_padding_mask=condition_mask)
+        
+        # DEBUG: Check signal flow (Randomly sampled to avoid spam)
+        if torch.rand(1).item() < 0.001:
+            print(f"\n[DEBUG BLOCK] GT2 (Gate): {gt2.mean().item():.4f} | GT2 Max: {gt2.max().item():.4f}")
+            print(f"[DEBUG BLOCK] Condition Norm: {condition.norm(dim=-1).mean().item():.4f}")
+            print(f"[DEBUG BLOCK] Attn Out Norm: {h_attn.norm(dim=-1).mean().item():.4f}")
+            print(f"[DEBUG BLOCK] Residual Scale: {(gt2.unsqueeze(1) * h_attn).norm(dim=-1).mean().item():.4f}")
+
+        x = x + gt2.unsqueeze(1) * h_attn
 
         # D. Feed-Forward (Gated Residual)
         h = self.modulate(self.ff_norm(x), sft3, scl3)
