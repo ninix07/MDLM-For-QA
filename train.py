@@ -997,6 +997,7 @@ def main():
         max_answer_length=config.model.max_answer_length,
         shuffle=True,
         only_answerable=args.only_answerable,
+        unanswerable_sample_ratio=args.unanswerable_sample_ratio,
     )
 
     print("Loading validation data...")
